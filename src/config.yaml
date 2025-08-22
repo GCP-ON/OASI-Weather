@@ -1,0 +1,20 @@
+# Configurações de Localização
+location:
+  name: OASI Weather Station
+  country: Brazil
+  state: Pernambuco
+  city: Itacuruba
+  region: Nordeste
+
+LATITUDE: -8.79225
+LONGITUDE: -38.68853
+ALTITUDE: 390
+
+# Configurações do Dashboard
+TIME_OPTIONS:
+  Ultima Hora: 60
+  Ultimas 2 horas: 120
+  Ultimas 6 horas: 360
+  Ultimas 12 horas: 720
+  Ultimas dia: 1440
+  Ultimas 2 dias: 2880

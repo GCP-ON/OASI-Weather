@@ -1,0 +1,213 @@
+body {
+    background-color: #000000 !important;
+}
+
+.main-container {
+    font-family: 'Montserrat', Arial, sans-serif;
+    padding: 10px;
+    background-color: #202529;
+    color: #e0e0e0;
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 5px;
+    background-color: #000000;
+}
+
+.logo-img {
+    height: 100px;
+    vertical-align: middle;
+    margin-right: 0px;
+    display: inline-block;
+    background-color: #000000;
+    padding: 10px;
+    margin-left: 0px;
+}
+
+.header-title {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+
+.header-title h1 {
+    text-align: center;
+    margin-bottom: 5px;
+    color: #e0e0e0;
+    padding: 10px;
+    font-size: 2.2em;
+    font-weight: bold;
+    display: inline-block;
+    vertical-align: middle;
+    width: 100%;
+}
+
+.header-title h3 {
+    text-align: center;
+    margin-top: 1px;
+    color: #e0e0e0;
+    padding: 6px;
+    font-size: 1.2em;
+    font-weight: normal;
+    display: inline-block;
+    vertical-align: middle;
+    width: 100%;
+}
+
+.loop-status-box {
+    background-color: #26313B;
+    border-radius: 8px;
+    box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
+    padding: 12px 18px;
+    margin-left: 18px;
+    margin-right: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 70px;
+}
+
+.main-row {
+    width: 100%;
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+}
+
+.info-box-container {
+    width: 20%;
+    display: inline-block;
+    vertical-align: top;
+    padding-right: 5px;
+    height: 775px;
+}
+
+.info-box {
+    font-size: 0.95em;
+    color: #e0e0e0;
+    padding: 15px;
+    background-color: #26313B;
+    box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+
+.inpe-container {
+    width: 30%;
+    display: inline-block;
+    vertical-align: top;
+    padding-left: 5px;
+    padding-right: 5px;
+    padding-top: 5px;
+    height: 800px;
+}
+
+.inpe-iframe {
+    width: 100%;
+    height: 48%;
+    border: none;
+    background-color: #202529;
+    margin-bottom: 0px;
+}
+
+.weatherbug-iframe {
+    width: 100%;
+    height: 48%;
+    border: none;
+    background-color: #202529;
+    margin-top: 0px;
+}
+
+.all-sky-container {
+    width: 800px;
+    height: 800px;
+    display: inline-block;
+    vertical-align: top;
+    padding-left: 5px;
+}
+
+.all-sky-img {
+    width: 100%;
+    border: 2px solid #26313B;
+    background-color: #26313B;
+}
+
+.hr-divider {
+    border: none;
+    border-top: 2px solid #26313B;
+    margin: 20px 0 18px 0;
+    width: 100%;
+}
+
+.plots-row {
+    width: 100%;
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    /* margin-bottom: 120px; ensures space above the footer */
+}
+
+.plot-col {
+    width: 32%;
+    height: 300px;
+    display: inline-block;
+    vertical-align: top;
+}
+
+.plot-col-center {
+    width: 32%;
+    height: 300px;
+    display: inline-block;
+    vertical-align: top;
+    padding-right: 16px;
+}
+
+.time-selector-container {
+    width: 100%;
+    display: flex;
+    justify-content: flex-start;
+    margin-bottom: 18px; /* Add space below selector */
+}
+
+.time-selector-box {
+    background-color: #26313B;
+    border-radius: 8px;
+    box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
+    padding: 18px;
+    margin-bottom: 18px;
+}
+
+.time-selector-label {
+    font-weight: bold;
+    font-size: 1.1em;
+    margin-bottom: 8px;
+    padding-bottom: 18px;
+    color: #e0e0e0;
+}
+
+.time-selector-dropdown {
+    background-color: #dbdbe8;
+    color: #000000;
+    border: 1px solid #26313B;
+    margin-bottom: 0px;
+}
+
+.footer {
+    height: 100px;
+    background-color: #000000;
+    color: #e0e0e0;
+    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1em;
+    margin-top: 32px;
+    position: relative;
+    /* z-index: 10; */
+}
