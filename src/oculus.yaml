@@ -1,0 +1,34 @@
+project: OASI ALL SKY CAMERA
+camera_model: OCULUS_v1
+interface: HTTP REST API
+protocol: MJPEG
+
+# All sky camera configuration
+camera:
+  host: 192.168.100.100  # Placeholder IP (replace with real camera IP)
+  port: 8080
+  username: admin
+  password: ""  # Leave empty or set via env var ALLSKY_CAMERA_PASSWORD
+  stream_url: "/mjpg/video.mjpg"
+  timeout: 5
+  retry_count: 3
+
+# Image processing settings
+processing:
+  resolution: "1920x1080"
+  frame_rate: 15
+  quality: 85
+  format: "jpg"
+
+# Storage and archiving
+storage:
+  archive_path: "./data/allsky_images"
+  retention_days: 30
+  compress: true
+
+# Metadata
+metadata:
+  location: "Observatório Astronômico do Sertão de Itaparica"
+  latitude: -8.79225
+  longitude: -38.68853
+  elevation: 390

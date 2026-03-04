@@ -1,0 +1,96 @@
+project: OASI WEATHER STATION
+weather_station_model: SIGMA SENSORS
+host: 192.168.100.50  # Placeholder IP (replace with real station IP)
+service_port: 502
+interface: MODBUS TCP/IP
+function_code: 3  # Holding Register
+
+
+registers:
+  TENSAO_BATERIA:
+    sensor_type: BATERIA
+    unit: V
+    register: 25
+    data_type: float32
+    sensor_model: DIVISOR DE TENSÃO
+    description: Medição da tensão da bateria
+
+  VEL_VENTO:
+    sensor_type: ANEMÔMETRO
+    unit: m/s
+    register: 669
+    data_type: float32
+    sensor_model: FA013
+    description: Velocidade do vento
+
+  DIR_VENTO:
+    sensor_type: ANEMOSCÓPIO
+    unit: "°"
+    register: 681
+    data_type: float32
+    sensor_model: FA023
+    description: Direção do vento
+
+  SSTRH_TEMPERATURA:
+    sensor_type: TERMOHIGRÔMETRO
+    unit: °C
+    register: 693
+    data_type: float32
+    sensor_model: SS-TRH-RS485
+    description: Temperatura do ar
+
+  SSTRH_UMIDADE:
+    sensor_type: TERMOHIGRÔMETRO
+    unit: "%"
+    register: 705
+    data_type: float32
+    sensor_model: SS-TRH-RS485
+    description: Umidade do ar
+
+  CHUVA_ACUMULADA_MIN:
+    sensor_type: PLUVIÔMETRO
+    unit: mm/min
+    register: 717
+    data_type: float32
+    sensor_model: SS-RG01
+    description: Chuva acumulada do minuto
+
+  CHUVA_ACUMULADA_HORA:
+    sensor_type: PLUVIÔMETRO
+    unit: mm/h
+    register: 719
+    data_type: float32
+    sensor_model: SS-RG01
+    description: Chuva acumulada da hora
+
+  CHUVA_ACUMULADA_DIA:
+    sensor_type: PLUVIÔMETRO
+    unit: mm/dia
+    register: 721
+    data_type: float32
+    sensor_model: SS-RG01
+    description: Chuva acumulada do dia
+
+  CHUVA_ACUMULADA_TOTAL:
+    sensor_type: PLUVIÔMETRO
+    unit: mm
+    register: 723
+    data_type: float32
+    sensor_model: SS-RG01
+    description: Chuva acumulada total
+
+  TENSAO_FONTE:
+    sensor_type: TENSÃO FONTE
+    unit: V
+    register: 895
+    data_type: float32
+    sensor_model: DIVISOR DE TENSÃO
+    description: Medição da tensão DC da fonte
+
+  BAROMETRO:
+    sensor_type: BARÔMETRO
+    unit: hPa
+    register: 903
+    data_type: float32
+    sensor_model: SSB04
+    description: Medição da pressão barométrica

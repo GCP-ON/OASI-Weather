@@ -1,21 +1,21 @@
+import re
 import dash
 from dash import html, dcc, Input, Output
 import plotly.graph_objs as go
 import pandas as pd
 import numpy as np
 import datetime
-import requests
-import math
 import yaml
-
-from .util import generate_mock_data, get_moon_phase, get_sun_times
+from .util import get_moon_phase, get_sun_times
+from .weatherstation import generate_mock_data #, read_wlk
 import os
 
 # Inicializa com dados mock
 mock_data = generate_mock_data()
+# mock_data = read_wlk('/home/mario/sync/codigos/impacton/oasi-weather/test_data/2024-07.wlk')
+
 
 # ----------- Constants ----------- #
-
 config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
 with open(config_path, 'r') as f:
     config = yaml.safe_load(f)
@@ -146,7 +146,7 @@ app.layout = html.Div(
             html.Div([
                 dcc.Graph(id='humidity-plot', className='plot-graph'),
                 dcc.Graph(id='dew-point-plot', className='plot-graph'),
-            ], className="plot-col-center"),
+            ], className="plot-col"),
             # Right column: wind speed and wind direction
             html.Div([
                 dcc.Graph(id='wind-speed-plot', className='plot-graph'),
@@ -176,19 +176,16 @@ app.layout = html.Div(
     Output('wind-dir-plot', 'figure'),
     Output('loop-active-indicator', 'children'),
     Output('last-update-time', 'children'),
-    Output('all-sky-img', 'src'),  # Adicione este output
+    Output('all-sky-img', 'src'),
     Input('time-range-dropdown', 'value'),
     Input('clock-interval', 'n_intervals')
 )
-
-# -------- Update Dashboard -------- #
 def update_dashboard(minutes, n_intervals):
-    # Simula novos dados a cada atualização
     global mock_data
     if n_intervals > 0:
         now = datetime.datetime.now()
         new_row = {
-            'time': now,
+            'date': now,
             'temperature': np.random.normal(15, 3),
             'humidity': np.random.uniform(40, 90),
             'dew_point': np.random.normal(15, 3) - ((100 - np.random.uniform(40, 90)) / 5),
@@ -196,44 +193,41 @@ def update_dashboard(minutes, n_intervals):
             'wind_dir': np.random.uniform(0, 360),
             'pressure': np.random.normal(1013, 8)
         }
-        mock_data = pd.concat([mock_data, pd.DataFrame([new_row])], ignore_index=True)
-        # Mantém apenas os últimos 4 dias
-        mock_data = mock_data[mock_data['time'] >= (now - datetime.timedelta(days=4))]
-
+        mock_data.append(new_row)
+        mock_data = [row for row in mock_data if row['date'] >= (now - datetime.timedelta(days=4))]
     cutoff = datetime.datetime.now() - datetime.timedelta(minutes=minutes)
-    filtered = mock_data[mock_data['time'] >= cutoff]
+    filtered = [row for row in mock_data if row['date'] >= cutoff]
+    latest = filtered[-1]
+    df = pd.DataFrame(filtered)
 
-    latest = filtered.iloc[-1]
     sunrise, sunset = get_sun_times(LATITUDE, LONGITUDE)
 
-    # Status/last update
     loop_status = "Ativo" if n_intervals > 0 else "Inativo"
     loop_color = "#5eb9d2" if n_intervals > 0 else "#d95252"
-    last_update = latest['time'].strftime('%d/%m/%Y %H:%M:%S')
+    last_update = latest['date'].strftime('%d/%m/%Y %H:%M:%S')
 
     info_box = html.Div([
-        html.H4("Condições Atuais", style={'marginBottom': '10px', 'color': "#ffffff", 'fontWeight': 'bold', 'fontSize': '15px', 'textAlign': 'center'}),
+        html.H4("Condições Atuais", className="color-location", style={'marginBottom': '10px', 'fontWeight': 'bold', 'fontSize': '15px', 'textAlign': 'center'}),
         html.P([
             "Temperatura: ",
-            html.Span(f"{latest['temperature']:.1f} °C", style={'color': "#ef5c42", 'fontWeight': 'bold'})
+            html.Span(f"{latest['temperature']:.1f} °C", className="color-temp")
         ]),
         html.P([
             "Umidade: ",
-            html.Span(f"{latest['humidity']:.1f} %", style={'color': "#47b0d3", 'fontWeight': 'bold'})
+            html.Span(f"{latest['humidity']:.1f} %", className="color-humidity")
         ]),
         html.P([
             "Ponto de orvalho: ",
-            html.Span(f"{latest['dew_point']:.1f} °C", style={'color': "#aa96e3", 'fontWeight': 'bold'})
+            html.Span(f"{latest['dew_point']:.1f} °C", className="color-dew")
         ]),
         html.P([
             "Velocidade do vento: ",
-            html.Span(f"{latest['wind_speed']:.1f} km/h", style={'color': "#76d465", 'fontWeight': 'bold'})
+            html.Span(f"{latest['wind_speed']:.1f} km/h", className="color-wind-speed")
         ]),
         html.P([
             "Direção do vento: ",
-            html.Span(f"{latest['wind_dir']:.0f}°", style={'color': '#7fd1b9', 'fontWeight': 'bold'})
+            html.Span(f"{latest['wind_dir']:.0f}°", className="color-wind-dir")
         ]),
-        # Rosa dos ventos
         html.Div([
             dcc.Graph(
                 id='wind-rose',
@@ -242,8 +236,8 @@ def update_dashboard(minutes, n_intervals):
                         go.Barpolar(
                             r=[latest['wind_speed']],
                             theta=[latest['wind_dir']],
-                            marker=dict(color='#7fd1b9'),
-                            width=[30],  # largura do setor
+                            marker=dict(color='var(--color-wind-dir)'),
+                            width=[30],
                             name='Direção Atual'
                         )
                     ],
@@ -256,11 +250,11 @@ def update_dashboard(minutes, n_intervals):
                                 tickmode='array',
                                 tickvals=[0, 45, 90, 135, 180, 225, 270, 315],
                                 ticktext=['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'],
-                                color='#e0e0e0'
+                                color='var(--color-location)'
                             ),
                             radialaxis=dict(
-                                visible=False,  # <--- Remove os ticks e números do centro
-                                color='#e0e0e0'
+                                visible=False,
+                                color='var(--color-location)'
                             )
                         ),
                         showlegend=False,
@@ -275,37 +269,37 @@ def update_dashboard(minutes, n_intervals):
             )
         ], style={'marginTop': '8px', 'marginBottom': '8px'}),
         html.Hr(),
-        html.H4("Localização", style={'marginBottom': '10px', 'color': "#ffffff", 'fontWeight': 'bold', 'fontSize': '15px', 'textAlign': 'center'}),
+        html.H4("Localização", className="color-location", style={'marginBottom': '10px', 'fontWeight': 'bold', 'fontSize': '15px', 'textAlign': 'center'}),
         html.P([
             "Latitude: ",
-            html.Span("8° 47' 32,1\" S", style={'color': "#ffffff", 'fontWeight': 'bold'})
+            html.Span("8° 47' 32,1\" S", className="color-location")
         ]),
         html.P([
             "Longitude: ",
-            html.Span("38° 41' 18,7\" O", style={'color': '#ffffff', 'fontWeight': 'bold'})
+            html.Span("38° 41' 18,7\" O", className="color-location")
         ]),
         html.P([
             "Altitude: ",
-            html.Span(f"{ALTITUDE} m", style={'color': '#ffffff', 'fontWeight': 'bold'})
+            html.Span(f"{ALTITUDE} m", className="color-location")
         ]),
         html.P([
             "Nascer do sol: ",
-            html.Span(f"{sunrise}", style={'color': "#f3dc76", 'fontWeight': 'bold'})
+            html.Span(f"{sunrise}", className="color-sun")
         ]),
         html.P([
             "Pôr do sol: ",
-            html.Span(f"{sunset}", style={'color': '#f3dc76', 'fontWeight': 'bold'})
+            html.Span(f"{sunset}", className="color-sun")
         ]),
         html.P([
             "Fase da lua: ",
-            html.Span(get_moon_phase(), style={'color': "#cececc", 'fontWeight': 'bold'})
+            html.Span(get_moon_phase(), className="color-moon")
         ])
     ])
     # Plots
     temp_fig = go.Figure(
         data=[go.Scatter(
-            x=filtered['time'],
-            y=filtered['temperature'],
+            x=df['date'],
+            y=df['temperature'],
             mode='lines',
             name='Temperatura',
             line={'color': '#ef5c42'}
@@ -320,8 +314,8 @@ def update_dashboard(minutes, n_intervals):
         }
     )
     dew_fig = go.Figure(
-        data=[go.Scatter(x=filtered['time'], 
-                         y=filtered['dew_point'], 
+        data=[go.Scatter(x=df['date'], 
+                         y=df['dew_point'], 
                          mode='lines', 
                          name='Ponto de Orvalho',
                          line={'color': '#aa96e3'})],
@@ -335,8 +329,8 @@ def update_dashboard(minutes, n_intervals):
         }
     )
     hum_fig = go.Figure(
-        data=[go.Scatter(x=filtered['time'], 
-                         y=filtered['humidity'], 
+        data=[go.Scatter(x=df['date'], 
+                         y=df['humidity'], 
                          mode='lines', 
                          name='Umidade',
                          line={'color': '#47b0d3'})],
@@ -350,8 +344,8 @@ def update_dashboard(minutes, n_intervals):
         }
     )
     pressure_fig = go.Figure(
-        data=[go.Scatter(x=filtered['time'], 
-                         y=filtered['pressure'], 
+        data=[go.Scatter(x=df['date'], 
+                         y=df['pressure'], 
                          mode='lines', 
                          name='Pressão Atmosférica')],
         layout={
@@ -364,8 +358,8 @@ def update_dashboard(minutes, n_intervals):
         }
     )
     wind_fig = go.Figure(
-        data=[go.Scatter(x=filtered['time'], 
-                         y=filtered['wind_speed'], 
+        data=[go.Scatter(x=df['date'], 
+                         y=df['wind_speed'], 
                          mode='lines', 
                          name='Velocidade do Vento',
                          line={'color': '#76d465'})],
@@ -379,8 +373,8 @@ def update_dashboard(minutes, n_intervals):
         }
     )
     dir_fig = go.Figure(
-        data=[go.Scatter(x=filtered['time'], 
-                         y=filtered['wind_dir'], 
+        data=[go.Scatter(x=df['date'], 
+                         y=df['wind_dir'], 
                          mode='lines', 
                          name='Direção do Vento',
                          line={'color': '#7fd1b9'})],
@@ -394,7 +388,6 @@ def update_dashboard(minutes, n_intervals):
         }
     )
 
-    # Atualiza a imagem All Sky (simulação: sempre o mesmo URL)
     all_sky_url = update_allsky_image()
 
     return (
@@ -414,11 +407,8 @@ def update_dashboard(minutes, n_intervals):
         all_sky_url
     )
 
-
 def update_allsky_image():
-    # Lógica para atualizar a imagem do céu
     return 'https://tse4.mm.bing.net/th/id/OIP.88LnC-aFnoEce7DoolPx8wHaG6?pid=Api'
-
 
 # ----------- Main ----------- #
 if __name__ == '__main__':

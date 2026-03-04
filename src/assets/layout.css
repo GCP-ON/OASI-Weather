@@ -150,7 +150,9 @@ body {
     display: flex;
     flex-direction: row;
     justify-content: space-between;
-    /* margin-bottom: 120px; ensures space above the footer */
+    margin-bottom: 120px; /* ensures space above the footer */
+    height: 600px;
+
 }
 
 .plot-col {
@@ -160,18 +162,18 @@ body {
     vertical-align: top;
 }
 
-.plot-col-center {
+/* .plot-col-center {
     width: 32%;
     height: 300px;
     display: inline-block;
     vertical-align: top;
     padding-right: 16px;
-}
+} */
 
 .time-selector-container {
     width: 100%;
     display: flex;
-    justify-content: flex-start;
+    justify-content: center;
     margin-bottom: 18px; /* Add space below selector */
 }
 
@@ -181,6 +183,7 @@ body {
     box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
     padding: 18px;
     margin-bottom: 18px;
+    width: 60%;
 }
 
 .time-selector-label {
@@ -189,6 +192,7 @@ body {
     margin-bottom: 8px;
     padding-bottom: 18px;
     color: #e0e0e0;
+    width: 100%;
 }
 
 .time-selector-dropdown {
@@ -211,3 +215,27 @@ body {
     position: relative;
     /* z-index: 10; */
 }
+
+:root {
+    --color-temp: #ef5c42;
+    --color-humidity: #47b0d3;
+    --color-dew: #aa96e3;
+    --color-wind-speed: #76d465;
+    --color-wind-dir: #7fd1b9;
+    --color-sun: #f3dc76;
+    --color-location: #ffffff;
+    --color-moon: #cececc;
+    --color-loop-active: #5eb9d2;
+    --color-loop-inactive: #d95252;
+}
+
+.color-temp { color: var(--color-temp); font-weight: bold; }
+.color-humidity { color: var(--color-humidity); font-weight: bold; }
+.color-dew { color: var(--color-dew); font-weight: bold; }
+.color-wind-speed { color: var(--color-wind-speed); font-weight: bold; }
+.color-wind-dir { color: var(--color-wind-dir); font-weight: bold; }
+.color-sun { color: var(--color-sun); font-weight: bold; }
+.color-location { color: var(--color-location); font-weight: bold; }
+.color-moon { color: var(--color-moon); font-weight: bold; }
+.color-loop-active { color: var(--color-loop-active); font-weight: bold; }
+.color-loop-inactive { color: var(--color-loop-inactive); font-weight: bold; }

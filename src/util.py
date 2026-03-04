@@ -1,34 +1,7 @@
 
 import datetime
 import requests
-import numpy as np
-import pandas as pd
 
-
-def generate_mock_data():
-    r"""
-    Gera dados meteorológicos simulados para um período de 4 dias.
-    """
-    np.random.seed(42)
-    now = datetime.datetime.now()
-    time_range = pd.date_range(end=now, periods=6*24*4, freq='10min')  # 4 days of data
-
-    temperature = np.random.normal(15, 3, size=len(time_range))
-    humidity = np.random.uniform(40, 90, size=len(time_range))
-    dew_point = temperature - ((100 - humidity) / 5)
-    wind_speed = np.random.uniform(0, 20, size=len(time_range))
-    wind_dir = np.random.uniform(0, 360, size=len(time_range))
-    pressure = np.random.normal(1013, 8, size=len(time_range))
-
-    return pd.DataFrame({
-                         'time': time_range,
-                         'temperature': temperature,
-                         'humidity': humidity,
-                         'dew_point': dew_point,
-                         'wind_speed': wind_speed,
-                         'wind_dir': wind_dir,
-                         'pressure': pressure
-                        })
 
 
 def get_sun_times(lat, lon):

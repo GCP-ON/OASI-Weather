@@ -10,7 +10,9 @@ dependencies = [
     "matplotlib>=3.10.5",
     "numpy>=2.3.2",
     "pandas>=2.3.1",
+    "pymodbus>=3.8.6",
     "pyvantagepro>=0.3.2",
+    "weatherlink>=1.1.10",
 ]
 
 [tool.setuptools]
