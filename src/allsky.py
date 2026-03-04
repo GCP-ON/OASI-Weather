@@ -19,6 +19,24 @@ except ImportError:
     BytesIO = None
 
 
+
+def read_allsky(allsky_config_path):
+    """Get the URL for the all-sky camera image.
+    
+    Returns the URL for the current all-sky camera image. Currently returns
+    a placeholder image. In production, this should fetch the live camera
+    stream or latest image from the oculus camera system.
+    
+    Returns:
+        str: URL of the all-sky image to display.
+    
+    Todo:
+        Integrate with actual all-sky camera via oculus.yaml configuration.
+    """
+    return 'https://tse4.mm.bing.net/th/id/OIP.88LnC-aFnoEce7DoolPx8wHaG6?pid=Api'
+
+
+
 def read_oculus_config(config_path):
     """
     Load All Sky camera configuration from YAML file.

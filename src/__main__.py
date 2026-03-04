@@ -1,4 +1,42 @@
-import re
+"""OASI-Weather Dashboard Application.
+
+This module implements the main web dashboard for the Observatório Astronômico
+do Sertão de Itaparica (OASI) weather monitoring system. It provides real-time
+visualization of meteorological data from a weather station via Modbus TCP,
+along with all-sky camera imagery and external weather service integrations.
+
+The dashboard displays:
+    - Current weather conditions (temperature, humidity, pressure, wind, rain)
+    - Historical weather plots (configurable time ranges)
+    - Wind rose visualization
+    - All-sky camera live view
+    - Sun/moon information (sunrise, sunset, moon phase)
+    - Embedded external services (INPE satellite, WeatherBug)
+
+Modbus Communication:
+    Weather station data is read via Modbus TCP protocol using register mappings
+    defined in sigma.yaml.
+
+Architecture:
+    - Dash web framework for UI rendering and callbacks
+    - Plotly for interactive charts
+    - 10-second update interval for live data
+    - 4-day rolling data buffer
+    - Graceful degradation to offline mode on connection failure
+
+Usage:
+    Run dashboard:
+        $ python -m src
+
+Configuration:
+    - config.yaml: Dashboard settings (location, time options)
+    - sigma.yaml: Weather station Modbus register map (optional)
+    - oculus.yaml: All-sky camera settings (optional)
+
+Author: OASI Team
+Date: 2025
+"""
+
 import dash
 from dash import html, dcc, Input, Output
 import plotly.graph_objs as go
@@ -7,27 +45,35 @@ import numpy as np
 import datetime
 import yaml
 from .util import get_moon_phase, get_sun_times
-from .weatherstation import generate_mock_data #, read_wlk
+from .weatherstation import read_weather_station, _build_offline_row, _format_metric
+from .allsky import read_allsky
 import os
 
-# Inicializa com dados mock
-mock_data = generate_mock_data()
-# mock_data = read_wlk('/home/mario/sync/codigos/impacton/oasi-weather/test_data/2024-07.wlk')
+# ============================================================================
+# Global State Variables
+# ============================================================================
 
+#: list: Rolling buffer of weather data records (max 4 days)
+weather_data = []
 
-# ----------- Constants ----------- #
+# ============================================================================
+# Server and Observatory Configuration Loading
+# ============================================================================
+
+# Load dashboard configuration from YAML
 config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
 with open(config_path, 'r') as f:
     config = yaml.safe_load(f)
 
-TIME_OPTIONS = config['TIME_OPTIONS']
-LATITUDE = config['LATITUDE']
-LONGITUDE = config['LONGITUDE']
-ALTITUDE = config['ALTITUDE']
+# ============================================================================
+# Dash Application Setup
+# ============================================================================
 
-# ----------- Dash App Initialization ----------- #
+# Initialize Dash
 app = dash.Dash(__name__, prevent_initial_callbacks=True)
 app.title = "OASI-Weather"
+
+# 
 app.index_string = '''
 <!DOCTYPE html>
 <html>
@@ -62,7 +108,7 @@ app.layout = html.Div(
         html.Div([
             # Logo on the left
             html.Img(
-                src='https://tse3.mm.bing.net/th/id/OIP.dkPjsWzf2yJfoMq3ziBVsgHaH2?pid=Api',
+                src='https://github.com/GCP-ON/OASI-Weather/blob/master/src/assets/logo-impacton.jpg?raw=true',
                 className="logo-img"
             ),
             # Title and subtitle in the center
@@ -98,11 +144,11 @@ app.layout = html.Div(
             # Satellite and WeatherBug iframes (center column)
             html.Div([
                 html.Iframe(
-                    src="https://www.cptec.inpe.br/dsat/?product=true_color_ch13_dsa&product_opacity=1&date=202508051340&zoom=6&x=4560.0000&y=3153.5000&animate=true&t=350.00&options=false&legend=false",
+                    src=f"https://www.cptec.inpe.br/dsat/?product=true_color_ch13_dsa&product_opacity=1&date=202508051340&zoom=6&x=4560.0000&y=3153.5000&animate=true&t=350.00&options=false&legend=false",
                     className="inpe-iframe"
                 ),
                 html.Iframe(
-                    src="https://lxapp.weatherbug.net/v2/lxapp_impl.html?lat=-8.79225&lon=-38.68853&tv=1.8.1&nocache=1",
+                    src=f"https://lxapp.weatherbug.net/v2/lxapp_impl.html?lat={config['LATITUDE']}&lon={config['LONGITUDE']}&tv=1.8.1&nocache=1",
                     className="weatherbug-iframe"
                 )
             ], className="inpe-container"),
@@ -126,7 +172,7 @@ app.layout = html.Div(
                 dcc.Dropdown(
                     id='time-range-dropdown',
                     options=[
-                        {'label': k, 'value': v} for k, v in TIME_OPTIONS.items()
+                        {'label': k, 'value': v} for k, v in config['TIME_OPTIONS'].items()
                     ],
                     value=60,
                     clearable=False,
@@ -155,7 +201,7 @@ app.layout = html.Div(
         ], className="plots-row"),
 
         # ----------- Interval for Updates ----------- #
-        dcc.Interval(id='clock-interval', interval=10000, n_intervals=0),
+        dcc.Interval(id='clock-interval', interval=config['UPDATE_INTERVAL_SECONDS'] * 1000, n_intervals=0),
 
         # ----------- Footer ----------- #
         html.Footer(
@@ -165,7 +211,10 @@ app.layout = html.Div(
     ]
 )
 
-# ----------- Callbacks ----------- #
+# ============================================================================
+# Dashboard Callbacks
+# ============================================================================
+
 @app.callback(
     Output('info-box', 'children'),
     Output('temperature-plot', 'figure'),
@@ -181,52 +230,133 @@ app.layout = html.Div(
     Input('clock-interval', 'n_intervals')
 )
 def update_dashboard(minutes, n_intervals):
-    global mock_data
-    if n_intervals > 0:
-        now = datetime.datetime.now()
-        new_row = {
-            'date': now,
-            'temperature': np.random.normal(15, 3),
-            'humidity': np.random.uniform(40, 90),
-            'dew_point': np.random.normal(15, 3) - ((100 - np.random.uniform(40, 90)) / 5),
-            'wind_speed': np.random.uniform(0, 20),
-            'wind_dir': np.random.uniform(0, 360),
-            'pressure': np.random.normal(1013, 8)
-        }
-        mock_data.append(new_row)
-        mock_data = [row for row in mock_data if row['date'] >= (now - datetime.timedelta(days=4))]
+    """Main callback function to update all dashboard components.
+    
+    This callback is triggered every 10 seconds (clock-interval) or when the
+    time range dropdown is changed. It fetches new weather data, updates the
+    rolling data buffer, filters data for the selected time range, and
+    regenerates all UI components with the latest information.
+    
+    Data Flow:
+        1. Fetch new data from weather station
+        2. Append to rolling buffer (keeps last 4 days)
+        3. Filter data for selected time range
+        4. Build info box with current conditions
+        5. Generate 6 weather plots
+        6. Update status indicators
+    
+    Args:
+        minutes (int): Time range in minutes selected by user (from dropdown).
+        n_intervals (int): Number of 10-second intervals elapsed (triggers updates).
+    
+    Returns:
+        tuple: Contains 10 elements in order:
+            - info_box (html.Div): Current conditions and location info panel
+            - temp_fig (go.Figure): Temperature timeseries plot
+            - hum_fig (go.Figure): Humidity timeseries plot
+            - dew_fig (go.Figure): Dew point timeseries plot
+            - pressure_fig (go.Figure): Pressure timeseries plot
+            - wind_fig (go.Figure): Wind speed timeseries plot
+            - dir_fig (go.Figure): Wind direction timeseries plot
+            - status_indicator (html.Span): Status label with color
+            - update_time (html.Span): Last update timestamp
+            - all_sky_url (str): URL for all-sky camera image
+    
+    Raises:
+        Exception: Caught internally. Connection failures result in offline mode.
+    
+    Note:
+        Uses global variable `weather_data`.
+    """
+    global weather_data
+    
+    # Current timestamp
+    now = datetime.datetime.now()
+    
+    # Initialize status indicators
+    source_label = "Estação"
+    loop_status = "Ativo"
+    loop_color = "#5eb9d2"  # Blue for active
+
+    # Live mode: attempt to read from weather station
+    try:
+        new_row = read_weather_station(config['WEATHER_STATION_CONFIG'])
+        station_status = str(new_row.get('station_status', new_row.get('status', 'Ativo')))
+        station_online = bool(new_row.get('station_online', True))
+        loop_status = station_status
+        if (not station_online) or station_status.lower() in {'offline', 'erro', 'error', 'falha'}:
+            loop_color = "#d95252"
+    except Exception:
+        # Connection failed - switch to offline mode
+        loop_status = "Offline"
+        loop_color = "#d95252"  # Red for offline
+        new_row = _build_offline_row(now)
+
+    # Add new data to rolling buffer
+    weather_data.append(new_row)
+    
+    # Keep only last 4 days of data to prevent memory bloat
+    weather_data = [row for row in weather_data if row['date'] >= (now - datetime.timedelta(days=4))]
+
+    # Filter data for selected time range
     cutoff = datetime.datetime.now() - datetime.timedelta(minutes=minutes)
-    filtered = [row for row in mock_data if row['date'] >= cutoff]
+    filtered = [row for row in weather_data if row['date'] >= cutoff]
+    
+    # Fallback: use latest available data if no data in range
+    if not filtered and weather_data:
+        filtered = weather_data[-1:]
+    
+    # Fallback: use offline row if no data at all
+    if not filtered:
+        filtered = [_build_offline_row(now)]
+
+    # Extract latest record and convert to DataFrame for plotting
     latest = filtered[-1]
     df = pd.DataFrame(filtered)
 
-    sunrise, sunset = get_sun_times(LATITUDE, LONGITUDE)
+    # Get astronomical information
+    sunrise, sunset = get_sun_times(config['LATITUDE'], config['LONGITUDE'])
 
-    loop_status = "Ativo" if n_intervals > 0 else "Inativo"
-    loop_color = "#5eb9d2" if n_intervals > 0 else "#d95252"
+    # Format last update time
     last_update = latest['date'].strftime('%d/%m/%Y %H:%M:%S')
+    
+    # Prepare wind rose data (use 0 for NaN to avoid display issues)
+    wind_rose_speed = 0 if pd.isna(latest.get('wind_speed', np.nan)) else latest['wind_speed']
+    wind_rose_dir = 0 if pd.isna(latest.get('wind_dir', np.nan)) else latest['wind_dir']
 
     info_box = html.Div([
         html.H4("Condições Atuais", className="color-location", style={'marginBottom': '10px', 'fontWeight': 'bold', 'fontSize': '15px', 'textAlign': 'center'}),
         html.P([
             "Temperatura: ",
-            html.Span(f"{latest['temperature']:.1f} °C", className="color-temp")
+            html.Span(_format_metric(latest.get('temperature'), '.1f', '°C'), className="color-temp")
         ]),
         html.P([
             "Umidade: ",
-            html.Span(f"{latest['humidity']:.1f} %", className="color-humidity")
+            html.Span(_format_metric(latest.get('humidity'), '.1f', '%'), className="color-humidity")
         ]),
         html.P([
             "Ponto de orvalho: ",
-            html.Span(f"{latest['dew_point']:.1f} °C", className="color-dew")
+            html.Span(_format_metric(latest.get('dew_point'), '.1f', '°C'), className="color-dew")
         ]),
         html.P([
             "Velocidade do vento: ",
-            html.Span(f"{latest['wind_speed']:.1f} km/h", className="color-wind-speed")
+            html.Span(_format_metric(latest.get('wind_speed'), '.1f', 'km/h'), className="color-wind-speed")
         ]),
         html.P([
             "Direção do vento: ",
-            html.Span(f"{latest['wind_dir']:.0f}°", className="color-wind-dir")
+            html.Span(_format_metric(latest.get('wind_dir'), '.0f', '°'), className="color-wind-dir")
+        ]),
+        html.P([
+            "Pressão: ",
+            html.Span(_format_metric(latest.get('pressure'), '.1f', 'hPa'), className="color-location")
+        ]),
+        html.P([
+            "Tensão bateria: ",
+            html.Span(_format_metric(latest.get('battery_voltage'), '.2f', 'V'), className="color-location")
+        ]),
+        html.P([
+            "Chuva (hora): ",
+            html.Span(_format_metric(latest.get('rain_hour'), '.2f', 'mm/h'), className="color-location")
         ]),
         html.Div([
             dcc.Graph(
@@ -234,8 +364,8 @@ def update_dashboard(minutes, n_intervals):
                 figure=go.Figure(
                     data=[
                         go.Barpolar(
-                            r=[latest['wind_speed']],
-                            theta=[latest['wind_dir']],
+                            r=[wind_rose_speed],
+                            theta=[wind_rose_dir],
                             marker=dict(color='var(--color-wind-dir)'),
                             width=[30],
                             name='Direção Atual'
@@ -272,15 +402,15 @@ def update_dashboard(minutes, n_intervals):
         html.H4("Localização", className="color-location", style={'marginBottom': '10px', 'fontWeight': 'bold', 'fontSize': '15px', 'textAlign': 'center'}),
         html.P([
             "Latitude: ",
-            html.Span("8° 47' 32,1\" S", className="color-location")
+            html.Span("8° 47' 32,1\" S", className="color-location") ########## -> fix latter
         ]),
         html.P([
             "Longitude: ",
-            html.Span("38° 41' 18,7\" O", className="color-location")
+            html.Span("38° 41' 18,7\" O", className="color-location") ########## -> fix latter
         ]),
         html.P([
             "Altitude: ",
-            html.Span(f"{ALTITUDE} m", className="color-location")
+            html.Span(f"{config['ALTITUDE']} m", className="color-location")
         ]),
         html.P([
             "Nascer do sol: ",
@@ -295,7 +425,8 @@ def update_dashboard(minutes, n_intervals):
             html.Span(get_moon_phase(), className="color-moon")
         ])
     ])
-    # Plots
+    
+    # Build all weather plots with consistent styling
     temp_fig = go.Figure(
         data=[go.Scatter(
             x=df['date'],
@@ -388,7 +519,7 @@ def update_dashboard(minutes, n_intervals):
         }
     )
 
-    all_sky_url = update_allsky_image()
+    all_sky_url = read_allsky(config['ALLSKY_CAMERA_CONFIG'])
 
     return (
         info_box,
@@ -398,7 +529,7 @@ def update_dashboard(minutes, n_intervals):
         pressure_fig,
         wind_fig,
         dir_fig,
-        html.Span(f"Status: {loop_status}", style={'color': loop_color}),
+        html.Span(f"Status: {loop_status} ({source_label})", style={'color': loop_color}),
         html.Span([
             "Última atualização:",
             html.Br(),
@@ -407,11 +538,13 @@ def update_dashboard(minutes, n_intervals):
         all_sky_url
     )
 
-def update_allsky_image():
-    return 'https://tse4.mm.bing.net/th/id/OIP.88LnC-aFnoEce7DoolPx8wHaG6?pid=Api'
+# ============================================================================
+# Application Entry Point
+# ============================================================================
 
-# ----------- Main ----------- #
 if __name__ == '__main__':
-    app.run(debug=True, port=8051)
-    # app.run(debug=False, port=8051)
+    # Application entry point when run directly
+    # Bind to all network interfaces to make accessible from other computers
+    # Access from other devices at: http://192.168.1.88:<port>
+    app.run(debug=True, host=config['SERVER_HOST'], port=config['SERVER_PORT'])
 
