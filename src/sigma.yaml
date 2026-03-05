@@ -1,6 +1,6 @@
 project: OASI WEATHER STATION
 weather_station_model: SIGMA SENSORS
-host: 192.168.100.50  # Placeholder IP (replace with real station IP)
+host: 192.168.1.56  # Placeholder IP (replace with real station IP)
 service_port: 502
 interface: MODBUS TCP/IP
 function_code: 3  # Holding Register

@@ -279,18 +279,21 @@ def update_dashboard(minutes, n_intervals):
     loop_color = "#5eb9d2"  # Blue for active
 
     # Live mode: attempt to read from weather station
-    try:
-        new_row = read_weather_station(config['WEATHER_STATION_CONFIG'])
-        station_status = str(new_row.get('station_status', new_row.get('status', 'Ativo')))
-        station_online = bool(new_row.get('station_online', True))
-        loop_status = station_status
-        if (not station_online) or station_status.lower() in {'offline', 'erro', 'error', 'falha'}:
-            loop_color = "#d95252"
-    except Exception:
-        # Connection failed - switch to offline mode
-        loop_status = "Offline"
-        loop_color = "#d95252"  # Red for offline
-        new_row = _build_offline_row(now)
+    # Resolve station config path relative to the package when not absolute
+    station_config = config.get('WEATHER_STATION_CONFIG', 'sigma.yaml')
+    if not os.path.isabs(station_config):
+        station_config = os.path.join(os.path.dirname(__file__), station_config)
+    new_row = read_weather_station(station_config)
+    station_status = str(new_row.get('station_status', new_row.get('status', 'Ativo')))
+    station_online = bool(new_row.get('station_online', True))
+    loop_status = station_status
+    if (not station_online) or station_status.lower() in {'offline', 'erro', 'error', 'falha'}:
+        loop_color = "#d95252"
+    # except Exception:
+    #     # Connection failed - switch to offline mode
+    #     loop_status = "Offline"
+    #     loop_color = "#d95252"  # Red for offline
+    #     new_row = _build_offline_row(now)
 
     # Add new data to rolling buffer
     weather_data.append(new_row)

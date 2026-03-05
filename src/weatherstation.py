@@ -198,12 +198,9 @@ def _read_register_value(client, register_address, data_type="float32", unit_id=
 def read_weather_station(station_config_path):
     with open(station_config_path, "r", encoding="utf-8") as file_handle:
         weather_config = yaml.safe_load(file_handle)
-
-    station_host = (
-        os.getenv("WEATHER_STATION_HOST")
-        or weather_config.get("host")
-        or weather_config.get("ip")
-    )
+    # print(weather_config)
+    station_host = weather_config["host"]
+    
     if not station_host:
         raise ValueError(
             "Station host is not configured. Set WEATHER_STATION_HOST or add host in sigma.yaml"
