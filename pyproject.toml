@@ -11,6 +11,9 @@ dependencies = [
     "numpy>=2.3.2",
     "pandas>=2.3.1",
     "pymodbus>=3.8.6",
+    "pillow>=11.1.0",
+    "pyyaml>=6.0",
+    "pywin32>=308; platform_system=='Windows'",  # ASCOM camera support (Windows only)
     # "pyvantagepro>=0.3.2",
     # "weatherlink>=1.1.10",
 ]

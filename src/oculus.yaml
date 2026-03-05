@@ -1,34 +1,65 @@
 project: OASI ALL SKY CAMERA
-camera_model: OCULUS_v1
-interface: HTTP REST API
-protocol: MJPEG
+camera_model: Starlight Express Oculus 3
+interface: ASCOM
+protocol: COM
 
-# All sky camera configuration
+# ASCOM Camera Configuration
+ascom:
+  device_id: "ASCOM.SXCamera.Camera"  # Starlight Express ASCOM driver ID
+  connect_timeout: 10  # seconds
+  retry_attempts: 3
+
+# Camera Settings
 camera:
-  host: 192.168.100.100  # Placeholder IP (replace with real camera IP)
-  port: 8080
-  username: admin
-  password: ""  # Leave empty or set via env var ALLSKY_CAMERA_PASSWORD
-  stream_url: "/mjpg/video.mjpg"
-  timeout: 5
-  retry_count: 3
+  # Exposure settings (only after sunset)
+  exposure_time: 30.0  # seconds
+  gain: 100  # 0-100 (camera dependent)
+  offset: 10  # 0-100 
+  binning: 1  # 1x1, 2x2, etc.
+  
+  # Temperature control (if supported)
+  cooling_enabled: true
+  target_temperature: -10  # degrees Celsius
+  temperature_tolerance: 2  # degrees
+  
+  # Image settings
+  image_format: "jpg"
+  quality: 90  # JPEG quality 1-100
+  
+# Night-only operation
+schedule:
+  capture_after_sunset_offset: 0  # minutes after sunset to start (0 = immediately)
+  capture_before_sunrise_offset: 0  # minutes before sunrise to stop
+  daytime_placeholder: "assets/daytime_placeholder.jpg"  # Image shown during day
 
-# Image processing settings
-processing:
-  resolution: "1920x1080"
-  frame_rate: 15
-  quality: 85
-  format: "jpg"
-
-# Storage and archiving
+# Image storage
 storage:
-  archive_path: "./data/allsky_images"
-  retention_days: 30
-  compress: true
+  save_path: "data/allsky"  # Relative to src/ directory
+  filename_pattern: "allsky_{timestamp}.jpg"  # {timestamp} = YYYYMMDD_HHMMSS
+  keep_latest_only: true  # If true, only keeps most recent image
+  archive_images: false  # If true, keeps all images
+  archive_path: "data/allsky_archive"
+  retention_days: 7
+
+# Image processing (post-capture)
+processing:
+  auto_stretch: true  # Enhance contrast
+  denoise: false
+  resize_width: 1920  # null for no resize
+  resize_height: 1080
+  watermark: true
+  watermark_text: "OASI - {timestamp}"
+  watermark_position: "bottom-right"  # top-left, top-right, bottom-left, bottom-right
 
 # Metadata
 metadata:
   location: "Observatório Astronômico do Sertão de Itaparica"
   latitude: -8.79225
   longitude: -38.68853
-  elevation: 390
+  altitude: 390  # meters
+
+# Error handling
+error_handling:
+  use_placeholder_on_error: true
+  placeholder_image: "assets/error_placeholder.jpg"
+  log_errors: true

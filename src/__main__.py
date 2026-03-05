@@ -47,6 +47,7 @@ import yaml
 from .util import get_moon_phase, get_sun_times
 from .weatherstation import read_weather_station, _build_offline_row, _format_metric
 from .allsky import read_allsky
+from .database import WeatherDatabase, get_yearly_db_path
 import os
 
 # ============================================================================
@@ -56,6 +57,12 @@ import os
 #: list: Rolling buffer of weather data records (max 4 days)
 weather_data = []
 
+#: WeatherDatabase: Persistent storage for weather readings
+db = None
+
+#: datetime: Timestamp of last database save
+last_db_save = None
+
 # ============================================================================
 # Server and Observatory Configuration Loading
 # ============================================================================
@@ -64,6 +71,20 @@ weather_data = []
 config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
 with open(config_path, 'r') as f:
     config = yaml.safe_load(f)
+
+# Initialize database with yearly file pattern
+db_pattern = config.get('DATABASE_PATH_PATTERN', 'weather_data_{year}.db')
+db_dir = os.path.dirname(__file__)
+db_path = get_yearly_db_path(db_pattern, db_dir)
+db = WeatherDatabase(str(db_path))
+
+# Load recent data from database on startup (last 4 days for in-memory buffer)
+startup_data = db.get_readings_since(minutes=4*24*60)
+if not startup_data.empty:
+    weather_data = startup_data.to_dict('records')
+    print(f"Loaded {len(weather_data)} readings from database at {db_path}")
+else:
+    print(f"Starting with empty database at {db_path}")
 
 # ============================================================================
 # Dash Application Setup
@@ -144,7 +165,7 @@ app.layout = html.Div(
             # Satellite and WeatherBug iframes (center column)
             html.Div([
                 html.Iframe(
-                    src=f"https://www.cptec.inpe.br/dsat/?product=true_color_ch13_dsa&product_opacity=1&date=202508051340&zoom=6&x=4560.0000&y=3153.5000&animate=true&t=350.00&options=false&legend=false",
+                    src="https://www.cptec.inpe.br/dsat/?product=true_color_ch13_dsa&product_opacity=1&date=202508051340&zoom=6&x=4560.0000&y=3153.5000&animate=true&t=350.00&options=false&legend=false",
                     className="inpe-iframe"
                 ),
                 html.Iframe(
@@ -205,7 +226,7 @@ app.layout = html.Div(
 
         # ----------- Footer ----------- #
         html.Footer(
-            "OASI-Weather © 2025 | Observatório Astronômico do Sertão de Itaparica",
+            "OASI-Weather | Observatório Astronômico do Sertão de Itaparica",
             className="footer"
         )
     ]
@@ -266,15 +287,14 @@ def update_dashboard(minutes, n_intervals):
         Exception: Caught internally. Connection failures result in offline mode.
     
     Note:
-        Uses global variable `weather_data`.
+        Uses global variables `weather_data`, `db`, and `last_db_save`.
     """
-    global weather_data
+    global weather_data, db, last_db_save
     
     # Current timestamp
     now = datetime.datetime.now()
     
     # Initialize status indicators
-    source_label = "Estação"
     loop_status = "Ativo"
     loop_color = "#5eb9d2"  # Blue for active
 
@@ -283,23 +303,33 @@ def update_dashboard(minutes, n_intervals):
     station_config = config.get('WEATHER_STATION_CONFIG', 'sigma.yaml')
     if not os.path.isabs(station_config):
         station_config = os.path.join(os.path.dirname(__file__), station_config)
-    new_row = read_weather_station(station_config)
-    station_status = str(new_row.get('station_status', new_row.get('status', 'Ativo')))
-    station_online = bool(new_row.get('station_online', True))
-    loop_status = station_status
-    if (not station_online) or station_status.lower() in {'offline', 'erro', 'error', 'falha'}:
-        loop_color = "#d95252"
-    # except Exception:
-    #     # Connection failed - switch to offline mode
-    #     loop_status = "Offline"
-    #     loop_color = "#d95252"  # Red for offline
-    #     new_row = _build_offline_row(now)
+    try:
+        new_row = read_weather_station(station_config)
+        station_status = str(new_row.get('station_status', new_row.get('status', 'Ativo')))
+        station_online = bool(new_row.get('station_online', True))
+        loop_status = station_status
+    # if (not station_online) or station_status.lower() in {'offline', 'erro', 'error', 'falha'}:
+    #     loop_color = "#d95252"
+    except Exception:
+        # Connection failed - switch to offline mode
+        loop_status = "Offline"
+        loop_color = "#d95252"  # Red for offline
+        new_row = _build_offline_row(now)
 
     # Add new data to rolling buffer
     weather_data.append(new_row)
     
     # Keep only last 4 days of data to prevent memory bloat
     weather_data = [row for row in weather_data if row['date'] >= (now - datetime.timedelta(days=4))]
+    
+    # Save to database periodically (every DATABASE_SAVE_INTERVAL_SECONDS)
+    save_interval = config.get('DATABASE_SAVE_INTERVAL_SECONDS', 600)
+    if last_db_save is None or (now - last_db_save).total_seconds() >= save_interval:
+        try:
+            db.insert_reading(new_row)
+            last_db_save = now
+        except Exception as e:
+            print(f"Warning: Failed to save to database: {e}")
 
     # Filter data for selected time range
     cutoff = datetime.datetime.now() - datetime.timedelta(minutes=minutes)
@@ -328,7 +358,7 @@ def update_dashboard(minutes, n_intervals):
     wind_rose_dir = 0 if pd.isna(latest.get('wind_dir', np.nan)) else latest['wind_dir']
 
     info_box = html.Div([
-        html.H4("Condições Atuais", className="color-location", style={'marginBottom': '10px', 'fontWeight': 'bold', 'fontSize': '15px', 'textAlign': 'center'}),
+        html.H4("Condições Atuais", className="color-location section-header"),
         html.P([
             "Temperatura: ",
             html.Span(_format_metric(latest.get('temperature'), '.1f', '°C'), className="color-temp")
@@ -353,10 +383,10 @@ def update_dashboard(minutes, n_intervals):
             "Pressão: ",
             html.Span(_format_metric(latest.get('pressure'), '.1f', 'hPa'), className="color-location")
         ]),
-        html.P([
-            "Tensão bateria: ",
-            html.Span(_format_metric(latest.get('battery_voltage'), '.2f', 'V'), className="color-location")
-        ]),
+        # html.P([
+        #     "Tensão bateria: ",
+        #     html.Span(_format_metric(latest.get('battery_voltage'), '.2f', 'V'), className="color-location")
+        # ]),
         html.P([
             "Chuva (hora): ",
             html.Span(_format_metric(latest.get('rain_hour'), '.2f', 'mm/h'), className="color-location")
@@ -398,11 +428,11 @@ def update_dashboard(minutes, n_intervals):
                     )
                 ),
                 config={'displayModeBar': False},
-                style={'height': '220px'}
+                className='graph-full-height'
             )
-        ], style={'marginTop': '8px', 'marginBottom': '8px'}),
+        ], className='wind-rose-container'),
         html.Hr(),
-        html.H4("Localização", className="color-location", style={'marginBottom': '10px', 'fontWeight': 'bold', 'fontSize': '15px', 'textAlign': 'center'}),
+        html.H4("Localização", className="color-location section-header"),
         html.P([
             "Latitude: ",
             html.Span("8° 47' 32,1\" S", className="color-location") ########## -> fix latter
@@ -532,7 +562,7 @@ def update_dashboard(minutes, n_intervals):
         pressure_fig,
         wind_fig,
         dir_fig,
-        html.Span(f"Status: {loop_status} ({source_label})", style={'color': loop_color}),
+        html.Span(f"Status: {loop_status}", className='status-indicator', style={'color': loop_color}),
         html.Span([
             "Última atualização:",
             html.Br(),

@@ -21,6 +21,7 @@ TIME_OPTIONS:
 
 UPDATE_INTERVAL_SECONDS: 10
 
+
 # Server Configuration
 SERVER_HOST: "0.0.0.0"
 SERVER_PORT: 8051
@@ -29,4 +30,8 @@ SERVER_PORT: 8051
 WEATHER_STATION_CONFIG: "sigma.yaml"
 ALLSKY_CAMERA_CONFIG: "oculus.yaml"
 
-# 
+# Database Configuration
+DATABASE_PATH_PATTERN: "weather_data_{year}.db"  # Creates separate file per year
+DATABASE_SAVE_INTERVAL_SECONDS: 600  # Save to database every 10 minutes
+
+#
