@@ -250,7 +250,7 @@ def read_weather_station(station_config_path):
         "temperature": float(temperature) if temperature is not None else np.nan,
         "humidity": float(humidity) if humidity is not None else np.nan,
         "dew_point": dew_point if dew_point is not None else np.nan,
-        "wind_speed": float(wind_speed_ms) * 3.6 if wind_speed_ms is not None else np.nan,
+        "wind_speed": float(wind_speed_ms) if wind_speed_ms is not None else np.nan,
         "wind_dir": float(wind_dir) if wind_dir is not None else np.nan,
         "pressure": float(pressure) if pressure is not None else np.nan,
         # "battery_voltage": float(values.get("TENSAO_BATERIA")) if values.get("TENSAO_BATERIA") is not None else np.nan,

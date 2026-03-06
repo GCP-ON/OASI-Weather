@@ -43,7 +43,9 @@ import plotly.graph_objs as go
 import pandas as pd
 import numpy as np
 import datetime
+from concurrent.futures import ThreadPoolExecutor
 import yaml
+from flask import send_file, abort
 from .util import get_moon_phase, get_sun_times
 from .weatherstation import read_weather_station, _build_offline_row, _format_metric
 from .allsky import read_allsky
@@ -63,6 +65,19 @@ db = None
 #: datetime: Timestamp of last database save
 last_db_save = None
 
+# Cached astronomical data to avoid external API call on every 1 Hz refresh
+sun_times_cache_date = None
+sunrise_cached = "N/D"
+sunset_cached = "N/D"
+
+# Async weather acquisition state (prevents 1 Hz UI callback from blocking).
+station_executor = ThreadPoolExecutor(max_workers=1)
+station_future = None
+latest_station_row = None
+latest_station_status = "Inicializando"
+latest_station_online = False
+last_station_poll = None
+
 # ============================================================================
 # Server and Observatory Configuration Loading
 # ============================================================================
@@ -72,17 +87,21 @@ config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
 with open(config_path, 'r') as f:
     config = yaml.safe_load(f)
 
+MEMORY_RETENTION_DAYS = int(config.get('IN_MEMORY_RETENTION_DAYS', 2))
+MAX_PLOT_POINTS = int(config.get('MAX_PLOT_POINTS', 4000))
+WEATHER_FETCH_INTERVAL_SECONDS = float(config.get('WEATHER_FETCH_INTERVAL_SECONDS', 1))
+
 # Initialize database with yearly file pattern
 db_pattern = config.get('DATABASE_PATH_PATTERN', 'weather_data_{year}.db')
 db_dir = os.path.dirname(__file__)
 db_path = get_yearly_db_path(db_pattern, db_dir)
 db = WeatherDatabase(str(db_path))
 
-# Load recent data from database on startup (last 4 days for in-memory buffer)
-startup_data = db.get_readings_since(minutes=4*24*60)
+# Load recent data from database on startup (bounded in-memory buffer)
+startup_data = db.get_readings_since(minutes=MEMORY_RETENTION_DAYS * 24 * 60)
 if not startup_data.empty:
     weather_data = startup_data.to_dict('records')
-    print(f"Loaded {len(weather_data)} readings from database at {db_path}")
+#    print(f"Loaded {len(weather_data)} readings from database at {db_path}")
 else:
     print(f"Starting with empty database at {db_path}")
 
@@ -93,6 +112,15 @@ else:
 # Initialize Dash
 app = dash.Dash(__name__, prevent_initial_callbacks=True)
 app.title = "OASI-Weather"
+
+
+@app.server.route('/allsky/latest.jpg')
+def serve_allsky_latest():
+    """Serve latest all-sky image from data directory (outside assets)."""
+    latest_path = os.path.join(os.path.dirname(__file__), 'data', 'allsky', 'latest.jpg')
+    if not os.path.exists(latest_path):
+        abort(404)
+    return send_file(latest_path, mimetype='image/jpeg', max_age=0, conditional=True)
 
 # 
 app.index_string = '''
@@ -223,6 +251,11 @@ app.layout = html.Div(
 
         # ----------- Interval for Updates ----------- #
         dcc.Interval(id='clock-interval', interval=config['UPDATE_INTERVAL_SECONDS'] * 1000, n_intervals=0),
+        dcc.Interval(
+            id='allsky-interval',
+            interval=config.get('ALLSKY_UPDATE_INTERVAL_SECONDS', config['UPDATE_INTERVAL_SECONDS']) * 1000,
+            n_intervals=0
+        ),
 
         # ----------- Footer ----------- #
         html.Footer(
@@ -236,6 +269,28 @@ app.layout = html.Div(
 # Dashboard Callbacks
 # ============================================================================
 
+
+def _get_cached_sun_times():
+    """Return sunrise/sunset with lightweight daily cache.
+
+    At 1 Hz UI updates, querying the sunrise API every callback can block
+    dashboard rendering. This cache refreshes once per day.
+    """
+    global sun_times_cache_date, sunrise_cached, sunset_cached
+    today = datetime.date.today()
+    if sun_times_cache_date != today:
+        sunrise_cached, sunset_cached = get_sun_times(config['LATITUDE'], config['LONGITUDE'])
+        sun_times_cache_date = today
+    return sunrise_cached, sunset_cached
+
+
+def _start_station_fetch(station_config_path):
+    """Submit a non-blocking weather station read if worker is idle."""
+    global station_future, last_station_poll
+    if station_future is None:
+        station_future = station_executor.submit(read_weather_station, station_config_path)
+        last_station_poll = datetime.datetime.now()
+
 @app.callback(
     Output('info-box', 'children'),
     Output('temperature-plot', 'figure'),
@@ -245,8 +300,6 @@ app.layout = html.Div(
     Output('wind-speed-plot', 'figure'),
     Output('wind-dir-plot', 'figure'),
     Output('loop-active-indicator', 'children'),
-    Output('last-update-time', 'children'),
-    Output('all-sky-img', 'src'),
     Input('time-range-dropdown', 'value'),
     Input('clock-interval', 'n_intervals')
 )
@@ -271,7 +324,7 @@ def update_dashboard(minutes, n_intervals):
         n_intervals (int): Number of 10-second intervals elapsed (triggers updates).
     
     Returns:
-        tuple: Contains 10 elements in order:
+        tuple: Contains 8 elements in order:
             - info_box (html.Div): Current conditions and location info panel
             - temp_fig (go.Figure): Temperature timeseries plot
             - hum_fig (go.Figure): Humidity timeseries plot
@@ -280,8 +333,6 @@ def update_dashboard(minutes, n_intervals):
             - wind_fig (go.Figure): Wind speed timeseries plot
             - dir_fig (go.Figure): Wind direction timeseries plot
             - status_indicator (html.Span): Status label with color
-            - update_time (html.Span): Last update timestamp
-            - all_sky_url (str): URL for all-sky camera image
     
     Raises:
         Exception: Caught internally. Connection failures result in offline mode.
@@ -290,37 +341,56 @@ def update_dashboard(minutes, n_intervals):
         Uses global variables `weather_data`, `db`, and `last_db_save`.
     """
     global weather_data, db, last_db_save
+    global station_future, latest_station_row, latest_station_status
+    global latest_station_online, last_station_poll
     
     # Current timestamp
     now = datetime.datetime.now()
     
-    # Initialize status indicators
-    loop_status = "Ativo"
-    loop_color = "#5eb9d2"  # Blue for active
-
-    # Live mode: attempt to read from weather station
+    # Resolve station config path relative to the package when not absolute
     # Resolve station config path relative to the package when not absolute
     station_config = config.get('WEATHER_STATION_CONFIG', 'sigma.yaml')
     if not os.path.isabs(station_config):
         station_config = os.path.join(os.path.dirname(__file__), station_config)
-    try:
-        new_row = read_weather_station(station_config)
-        station_status = str(new_row.get('station_status', new_row.get('status', 'Ativo')))
-        station_online = bool(new_row.get('station_online', True))
-        loop_status = station_status
-    # if (not station_online) or station_status.lower() in {'offline', 'erro', 'error', 'falha'}:
-    #     loop_color = "#d95252"
-    except Exception:
-        # Connection failed - switch to offline mode
+
+    # Kick off or collect async weather read without blocking this callback.
+    if station_future is None and (
+        last_station_poll is None
+        or (now - last_station_poll).total_seconds() >= WEATHER_FETCH_INTERVAL_SECONDS
+    ):
+        _start_station_fetch(station_config)
+
+    if station_future is not None and station_future.done():
+        try:
+            fetched_row = station_future.result()
+            latest_station_row = fetched_row
+            latest_station_status = str(fetched_row.get('station_status', fetched_row.get('status', 'Ativo')))
+            latest_station_online = bool(fetched_row.get('station_online', True))
+        except Exception:
+            latest_station_row = None
+            latest_station_status = "Offline"
+            latest_station_online = False
+        finally:
+            station_future = None
+
+    if latest_station_row is not None:
+        new_row = dict(latest_station_row)
+        new_row['date'] = now
+        loop_status = latest_station_status
+        loop_color = "#5eb9d2" if latest_station_online else "#d95252"
+    else:
         loop_status = "Offline"
-        loop_color = "#d95252"  # Red for offline
+        loop_color = "#d95252"
         new_row = _build_offline_row(now)
 
     # Add new data to rolling buffer
     weather_data.append(new_row)
     
-    # Keep only last 4 days of data to prevent memory bloat
-    weather_data = [row for row in weather_data if row['date'] >= (now - datetime.timedelta(days=4))]
+    # Keep bounded data in memory to prevent RAM growth with 1 Hz updates.
+    weather_data = [
+        row for row in weather_data
+        if row['date'] >= (now - datetime.timedelta(days=MEMORY_RETENTION_DAYS))
+    ]
     
     # Save to database periodically (every DATABASE_SAVE_INTERVAL_SECONDS)
     save_interval = config.get('DATABASE_SAVE_INTERVAL_SECONDS', 600)
@@ -347,15 +417,17 @@ def update_dashboard(minutes, n_intervals):
     latest = filtered[-1]
     df = pd.DataFrame(filtered)
 
-    # Get astronomical information
-    sunrise, sunset = get_sun_times(config['LATITUDE'], config['LONGITUDE'])
+    # Get astronomical information from cache (refresh once/day)
+    sunrise, sunset = _get_cached_sun_times()
 
-    # Format last update time
-    last_update = latest['date'].strftime('%d/%m/%Y %H:%M:%S')
-    
     # Prepare wind rose data (use 0 for NaN to avoid display issues)
     wind_rose_speed = 0 if pd.isna(latest.get('wind_speed', np.nan)) else latest['wind_speed']
     wind_rose_dir = 0 if pd.isna(latest.get('wind_dir', np.nan)) else latest['wind_dir']
+
+    # Reduce rendered points to keep browser responsive with high-frequency data.
+    if len(df) > MAX_PLOT_POINTS:
+        idx = np.linspace(0, len(df) - 1, MAX_PLOT_POINTS, dtype=int)
+        df = df.iloc[idx].copy()
 
     info_box = html.Div([
         html.H4("Condições Atuais", className="color-location section-header"),
@@ -373,7 +445,7 @@ def update_dashboard(minutes, n_intervals):
         ]),
         html.P([
             "Velocidade do vento: ",
-            html.Span(_format_metric(latest.get('wind_speed'), '.1f', 'km/h'), className="color-wind-speed")
+            html.Span(_format_metric(latest.get('wind_speed'), '.1f', 'm/s'), className="color-wind-speed")
         ]),
         html.P([
             "Direção do vento: ",
@@ -529,9 +601,9 @@ def update_dashboard(minutes, n_intervals):
                          line={'color': '#76d465'})],
         layout={
             'template': 'plotly_dark',
-            'title': 'Velocidade do Vento (km/h)',
+            'title': 'Velocidade do Vento (m/s)',
             'xaxis': {'title': 'Hora'},
-            'yaxis': {'title': 'km/h'},
+            'yaxis': {'title': 'm/s'},
             'paper_bgcolor': 'rgba(0,0,0,0)',
             'plot_bgcolor': 'rgba(0,0,0,0)'
         }
@@ -552,8 +624,6 @@ def update_dashboard(minutes, n_intervals):
         }
     )
 
-    all_sky_url = read_allsky(config['ALLSKY_CAMERA_CONFIG'])
-
     return (
         info_box,
         temp_fig,
@@ -562,14 +632,24 @@ def update_dashboard(minutes, n_intervals):
         pressure_fig,
         wind_fig,
         dir_fig,
-        html.Span(f"Status: {loop_status}", className='status-indicator', style={'color': loop_color}),
-        html.Span([
-            "Última atualização:",
-            html.Br(),
-            last_update
-        ]),
-        all_sky_url
+        html.Span(f"Status: {loop_status}", className='status-indicator', style={'color': loop_color})
     )
+
+
+@app.callback(
+    Output('all-sky-img', 'src'),
+    Output('last-update-time', 'children'),
+    Input('allsky-interval', 'n_intervals')
+)
+def update_allsky_image(_n_intervals):
+    """Update all-sky image independently and report image refresh time."""
+    all_sky_url = read_allsky(config['ALLSKY_CAMERA_CONFIG'])
+    image_update = datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+    return all_sky_url, html.Span([
+        "Última atualização da imagem:",
+        html.Br(),
+        image_update
+    ])
 
 # ============================================================================
 # Application Entry Point

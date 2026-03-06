@@ -5,7 +5,19 @@ protocol: COM
 
 # ASCOM Camera Configuration
 ascom:
-  device_id: "ASCOM.SXCamera.Camera"  # Starlight Express ASCOM driver ID
+  device_id: "ASCOM.sxCamera.Imaging0.Camera"  # Primary ASCOM ProgID (detected on this host)
+  # Optional fallback ProgIDs tried in order if `device_id` fails.
+  # Example for ASCOM Alpaca bridge or vendor-specific drivers:
+  # device_ids:
+  #   - "ASCOM.SXCamera.Camera"
+  #   - "ASCOM.StarlightXpress.Camera"
+  #   - "ASCOM.Alpaca.Camera"
+  device_ids:
+    - "ASCOM.sxCamera.Imaging0.Camera"
+    - "ASCOM.SXCamera.Camera"
+    - "ASCOM.Simulator.Camera"
+    - "CCDSimulator.Camera"
+  use_chooser_on_failure: false  # Open ASCOM chooser dialog if all IDs fail
   connect_timeout: 10  # seconds
   retry_attempts: 3
 
@@ -13,12 +25,17 @@ ascom:
 camera:
   # Exposure settings (only after sunset)
   exposure_time: 30.0  # seconds
-  gain: 100  # 0-100 (camera dependent)
+  min_capture_interval_seconds: 90  # Prevent overlapping/too-frequent captures
+  capture_timeout_seconds: 180  # Max wait for ImageReady before abort
+  gain: null  # null = do not set (driver may not support Gain)
   offset: 10  # 0-100 
   binning: 1  # 1x1, 2x2, etc.
+  apply_binning: false  # Enable only if your driver supports BinX/BinY reliably
+  apply_gain: false  # Enable only if your driver supports Gain writes
+  apply_cooling: false  # Enable only if your driver supports cooling control
   
   # Temperature control (if supported)
-  cooling_enabled: true
+  cooling_enabled: false  # Current driver reports CanSetCCDTemperature=False
   target_temperature: -10  # degrees Celsius
   temperature_tolerance: 2  # degrees
   
@@ -28,9 +45,9 @@ camera:
   
 # Night-only operation
 schedule:
-  capture_after_sunset_offset: 0  # minutes after sunset to start (0 = immediately)
+  capture_after_sunset_offset: 0  # minutes after sunset to start (negative = before sunset)
   capture_before_sunrise_offset: 0  # minutes before sunrise to stop
-  daytime_placeholder: "assets/daytime_placeholder.jpg"  # Image shown during day
+  daytime_placeholder: "/assets/logo-impacton.jpg"  # Image shown during day
 
 # Image storage
 storage:
@@ -45,8 +62,9 @@ storage:
 processing:
   auto_stretch: true  # Enhance contrast
   denoise: false
-  resize_width: 1920  # null for no resize
-  resize_height: 1080
+  preserve_aspect_ratio: true  # Keep original proportions when resizing
+  resize_width: 1920  # Set one dimension or both; aspect is preserved
+  resize_height: null
   watermark: true
   watermark_text: "OASI - {timestamp}"
   watermark_position: "bottom-right"  # top-left, top-right, bottom-left, bottom-right
@@ -61,5 +79,5 @@ metadata:
 # Error handling
 error_handling:
   use_placeholder_on_error: true
-  placeholder_image: "assets/error_placeholder.jpg"
+  placeholder_image: "/assets/logo-impacton.jpg"
   log_errors: true

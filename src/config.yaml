@@ -19,7 +19,11 @@ TIME_OPTIONS:
   Ultimas dia: 1440
   Ultimas 2 dias: 2880
 
-UPDATE_INTERVAL_SECONDS: 10
+UPDATE_INTERVAL_SECONDS: 1
+ALLSKY_UPDATE_INTERVAL_SECONDS: 30
+WEATHER_FETCH_INTERVAL_SECONDS: 1
+IN_MEMORY_RETENTION_DAYS: 2
+MAX_PLOT_POINTS: 4000
 
 
 # Server Configuration
@@ -32,6 +36,6 @@ ALLSKY_CAMERA_CONFIG: "oculus.yaml"
 
 # Database Configuration
 DATABASE_PATH_PATTERN: "weather_data_{year}.db"  # Creates separate file per year
-DATABASE_SAVE_INTERVAL_SECONDS: 600  # Save to database every 10 minutes
+DATABASE_SAVE_INTERVAL_SECONDS: 30  # Save weather to database every 30 seconds
 
 #
