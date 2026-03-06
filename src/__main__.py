@@ -110,7 +110,7 @@ else:
 # ============================================================================
 
 # Initialize Dash
-app = dash.Dash(__name__, prevent_initial_callbacks=True)
+app = dash.Dash(__name__, prevent_initial_callbacks=True, update_title=None)
 app.title = "OASI-Weather"
 
 
@@ -130,6 +130,7 @@ app.index_string = '''
         {%metas%}
         <title>OASI-Weather</title>
         {%favicon%}
+        <link rel="icon" type="image/jpeg" href="/assets/logo-impacton.jpg">
         {%css%}
         <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap" rel="stylesheet">
         <style>
