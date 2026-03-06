@@ -184,19 +184,25 @@ body {
 .plots-row {
     width: 100%;
     max-width: 1400px;
-    margin: 0 auto 120px auto;
+    margin: 0 auto 32px auto;
     display: flex;
     flex-direction: row;
     justify-content: space-between;
-    height: 600px;
+    align-items: flex-start;
+    height: auto;
 
 }
 
 .plot-col {
     width: 32%;
-    height: 300px;
-    display: inline-block;
+    height: auto;
+    display: flex;
+    flex-direction: column;
     vertical-align: top;
+}
+
+.plot-graph {
+    height: 290px;
 }
 
 /* .plot-col-center {
