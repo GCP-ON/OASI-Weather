@@ -47,7 +47,7 @@ camera:
 schedule:
   capture_after_sunset_offset: 0  # minutes after sunset to start (negative = before sunset)
   capture_before_sunrise_offset: 0  # minutes before sunrise to stop
-  daytime_placeholder: "/assets/logo-impacton.jpg"  # Image shown during day
+  daytime_placeholder: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'%3E%3Crect width='1' height='1' fill='%23000000'/%3E%3C/svg%3E"  # Black frame for daytime
 
 # Image storage
 storage:
@@ -79,5 +79,5 @@ metadata:
 # Error handling
 error_handling:
   use_placeholder_on_error: true
-  placeholder_image: "/assets/logo-impacton.jpg"
+  placeholder_image: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'%3E%3Crect width='1' height='1' fill='%23000000'/%3E%3C/svg%3E"  # Black frame on error/offline
   log_errors: true

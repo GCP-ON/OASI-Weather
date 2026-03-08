@@ -46,9 +46,9 @@ import datetime
 from concurrent.futures import ThreadPoolExecutor
 import yaml
 from flask import send_file, abort
-from .util import get_moon_phase, get_sun_times
+from .util import get_moon_phase, get_sun_times, get_moon_times
 from .weatherstation import read_weather_station, _build_offline_row, _format_metric
-from .allsky import read_allsky
+from .allsky import read_allsky, get_camera_status
 from .database import WeatherDatabase, get_yearly_db_path
 import os
 
@@ -130,7 +130,7 @@ app.index_string = '''
         {%metas%}
         <title>OASI-Weather</title>
         {%favicon%}
-        <link rel="icon" type="image/jpeg" href="/assets/logo-impacton.jpg">
+        <link rel="icon" type="image/jpeg" href="/assets/logo-impacton_round.png">
         {%css%}
         <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap" rel="stylesheet">
         <style>
@@ -158,7 +158,7 @@ app.layout = html.Div(
         html.Div([
             # Logo on the left
             html.Img(
-                src='https://github.com/GCP-ON/OASI-Weather/blob/master/src/assets/logo-impacton.jpg?raw=true',
+                src='https://github.com/GCP-ON/OASI-Weather/blob/master/src/assets/logo-impacton_round.png?raw=true',
                 className="logo-img"
             ),
             # Title and subtitle in the center
@@ -171,84 +171,132 @@ app.layout = html.Div(
                     "Estação Meteorológica e Câmera de Todo o Céu",
                     className="header-title"
                 ),
+                html.Div([
+                    html.Span("📍︎", className="location-icon"),
+                    html.Span("8° 47' 32,1\" S, 38° 41' 18,7\" O, 390 m", className="location-text")
+                ], className="header-location")
             ], className="header-title"),
-            # Loop status and last update on the right
-            html.Div([
-                html.Div(
-                    id='loop-status',
-                    className="loop-status-box",
-                    children=[
-                        html.Div(id='loop-active-indicator'),
-                        html.Div(id='last-update-time')
-                    ]
-                )
-            ])
+            # Logo ON on the right
+            html.Img(
+                src='/assets/logo-on_round.png',
+                className="logo-on-img"
+            )
         ], className="header"),
 
-        # ----------- Main Row: Info, Satellite, All Sky ----------- #
+        # ----------- Status Row ----------- #
         html.Div([
-            # Info box (left column)
+            html.Div(
+                id='loop-status',
+                className="loop-status-box",
+                children=[
+                    html.Div(id='loop-active-indicator'),
+                    html.Div(id='camera-status-indicator')
+                ]
+            )
+        ], className="status-row"),
+
+        # ----------- Main Row: 50/50 Split ----------- #
+        html.Div([
+            # Left half: 3-row grid
             html.Div([
-                html.Div(id='info-box', className="info-box")
-            ], className="info-box-container"),
-            # Satellite and WeatherBug iframes (center column)
+                # Row 1: Weather conditions and wind rose
+                html.Div([
+                    html.Div(id='info-box', className="info-box")
+                ], className="grid-card info-box-container"),
+                html.Div([
+                    dcc.Graph(
+                        id='wind-rose-plot',
+                        className='wind-plot-graph',
+                        config={'displayModeBar': False, 'responsive': True}
+                    )
+                ], className="grid-card wind-card"),
+                # Row 2: Astronomical information (spans both columns)
+                html.Div([
+                    html.Div(id='astro-info-box', className="astro-info-box")
+                ], className="grid-card astro-card"),
+                # Row 3: WeatherBug and INPE
+                html.Div([
+                    html.Iframe(
+                        src=f"https://lxapp.weatherbug.net/v2/lxapp_impl.html?lat={config['LATITUDE']}&lon={config['LONGITUDE']}&tv=1.8.1&nocache=1",
+                        className="weatherbug-iframe"
+                    )
+                ], className="grid-card iframe-card"),
+                html.Div([
+                    html.Iframe(
+                        src="https://www.cptec.inpe.br/dsat/?product=true_color_ch13_dsa&product_opacity=1&date=202508051340&zoom=6&x=4560.0000&y=3153.5000&animate=true&t=350.00&options=false&legend=false",
+                        className="inpe-iframe"
+                    )
+                ], className="grid-card iframe-card")
+            ], className="left-half left-grid"),
+            # Right half: all-sky image
             html.Div([
-                html.Iframe(
-                    src="https://www.cptec.inpe.br/dsat/?product=true_color_ch13_dsa&product_opacity=1&date=202508051340&zoom=6&x=4560.0000&y=3153.5000&animate=true&t=350.00&options=false&legend=false",
-                    className="inpe-iframe"
-                ),
-                html.Iframe(
-                    src=f"https://lxapp.weatherbug.net/v2/lxapp_impl.html?lat={config['LATITUDE']}&lon={config['LONGITUDE']}&tv=1.8.1&nocache=1",
-                    className="weatherbug-iframe"
-                )
-            ], className="inpe-container"),
-            # All Sky image (right column)
-            html.Div([
-                html.Img(
-                    id='all-sky-img',
-                    src='...',
-                    className='all-sky-img'
-                ),
-            ], className='all-sky-container'),
+                html.Div([
+                    html.Div(
+                        id='last-update-time',
+                        className='allsky-timestamp'
+                    ),
+                    html.Img(
+                        id='all-sky-img',
+                        src='data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="1" height="1"%3E%3Crect width="1" height="1" fill="%23000000"/%3E%3C/svg%3E',
+                        className='all-sky-img',
+                        style={'filter': 'brightness(100%)'}
+                    ),
+                    html.Div([
+                        html.Label('Brilho:', className='brightness-label'),
+                        dcc.Slider(
+                            id='brightness-slider',
+                            min=50,
+                            max=200,
+                            step=5,
+                            value=100,
+                            marks={50: '50%', 100: '100%', 150: '150%', 200: '200%'},
+                            tooltip={'placement': 'bottom', 'always_visible': False}
+                        )
+                    ], className='brightness-control')
+                ], className='all-sky-container')
+            ], className='right-half'),
         ], className="main-row"),
 
         # ----------- Divider Line ----------- #
         html.Hr(className="hr-divider"),
 
-        # ----------- Time Selector (above plots) ----------- #
+        # ----------- Bottom Container: Time Selector + Plots ----------- #
         html.Div([
+            # ----------- Time Selector (above plots) ----------- #
             html.Div([
-                html.Label("Escala de tempo", className="time-selector-label"),
-                dcc.Dropdown(
-                    id='time-range-dropdown',
-                    options=[
-                        {'label': k, 'value': v} for k, v in config['TIME_OPTIONS'].items()
-                    ],
-                    value=60,
-                    clearable=False,
-                    className="time-selector-dropdown"
-                )
-            ], className="time-selector-box"),
-        ], className="time-selector-container"),
+                html.Div([
+                    html.Label("Escala de tempo:", className="time-selector-label"),
+                    dcc.Dropdown(
+                        id='time-range-dropdown',
+                        options=[
+                            {'label': k, 'value': v} for k, v in config['TIME_OPTIONS'].items()
+                        ],
+                        value=60,
+                        clearable=False,
+                        className="time-selector-dropdown"
+                    )
+                ], className="time-selector-box"),
+            ], className="time-selector-container"),
 
-        # ----------- Plots Row ----------- #
-        html.Div([
-            # Left column: temperature and pressure
+            # ----------- Plots Row ----------- #
             html.Div([
-                dcc.Graph(id='temperature-plot', className='plot-graph'),
-                dcc.Graph(id='pressure-plot', className='plot-graph'),
-            ], className="plot-col"),
-            # Center column: humidity and dew point
-            html.Div([
-                dcc.Graph(id='humidity-plot', className='plot-graph'),
-                dcc.Graph(id='dew-point-plot', className='plot-graph'),
-            ], className="plot-col"),
-            # Right column: wind speed and wind direction
-            html.Div([
-                dcc.Graph(id='wind-speed-plot', className='plot-graph'),
-                dcc.Graph(id='wind-dir-plot', className='plot-graph'),
-            ], className="plot-col"),
-        ], className="plots-row"),
+                # Left column: temperature and pressure
+                html.Div([
+                    dcc.Graph(id='temperature-plot', className='plot-graph'),
+                    dcc.Graph(id='pressure-plot', className='plot-graph'),
+                ], className="plot-col"),
+                # Center column: humidity and dew point
+                html.Div([
+                    dcc.Graph(id='humidity-plot', className='plot-graph'),
+                    dcc.Graph(id='dew-point-plot', className='plot-graph'),
+                ], className="plot-col"),
+                # Right column: wind speed and wind direction
+                html.Div([
+                    dcc.Graph(id='wind-speed-plot', className='plot-graph'),
+                    dcc.Graph(id='wind-dir-plot', className='plot-graph'),
+                ], className="plot-col"),
+            ], className="plots-row"),
+        ], className="bottom-container"),
 
         # ----------- Interval for Updates ----------- #
         dcc.Interval(id='clock-interval', interval=config['UPDATE_INTERVAL_SECONDS'] * 1000, n_intervals=0),
@@ -294,13 +342,16 @@ def _start_station_fetch(station_config_path):
 
 @app.callback(
     Output('info-box', 'children'),
+    Output('astro-info-box', 'children'),
     Output('temperature-plot', 'figure'),
     Output('humidity-plot', 'figure'),
     Output('dew-point-plot', 'figure'),
     Output('pressure-plot', 'figure'),
     Output('wind-speed-plot', 'figure'),
     Output('wind-dir-plot', 'figure'),
+    Output('wind-rose-plot', 'figure'),
     Output('loop-active-indicator', 'children'),
+    Output('camera-status-indicator', 'children'),
     Input('time-range-dropdown', 'value'),
     Input('clock-interval', 'n_intervals')
 )
@@ -420,6 +471,7 @@ def update_dashboard(minutes, n_intervals):
 
     # Get astronomical information from cache (refresh once/day)
     sunrise, sunset = _get_cached_sun_times()
+    moonrise, moonset = get_moon_times(config['LATITUDE'], config['LONGITUDE'])
 
     # Prepare wind rose data (use 0 for NaN to avoid display issues)
     wind_rose_speed = 0 if pd.isna(latest.get('wind_speed', np.nan)) else latest['wind_speed']
@@ -430,8 +482,44 @@ def update_dashboard(minutes, n_intervals):
         idx = np.linspace(0, len(df) - 1, MAX_PLOT_POINTS, dtype=int)
         df = df.iloc[idx].copy()
 
+    # Calculate observation conditions based on last 30 minutes
+    cutoff_30min = now - datetime.timedelta(minutes=30)
+    last_30min = [row for row in weather_data if row['date'] >= cutoff_30min]
+    
+    if last_30min:
+        # Extract wind speeds and temperatures from last 30 min, filtering out NaN values
+        wind_speeds = [row.get('wind_speed', np.nan) for row in last_30min if not pd.isna(row.get('wind_speed', np.nan))]
+        temperatures = [row.get('temperature', np.nan) for row in last_30min if not pd.isna(row.get('temperature', np.nan))]
+        
+        wind_speed_max = max(wind_speeds) if wind_speeds else np.nan
+        wind_speed_avg = np.mean(wind_speeds) if wind_speeds else np.nan
+        temp_min = min(temperatures) if temperatures else np.nan
+        dew_point = latest.get('dew_point', np.nan)
+        
+        # Determine observation conditions color and status
+        if (not pd.isna(wind_speed_max) and not pd.isna(temp_min) and not pd.isna(dew_point)):
+            # Green: wind_speed_max < 12 AND dew_point < temp_min
+            if wind_speed_max < 12 and dew_point < temp_min:
+                obs_color = '#5eb9d2'  # Green/Blue
+                obs_status = 'Boas'
+            # Orange: wind_speed_max < 15 AND wind_speed_avg < 12 AND dew_point < temp_min - 2
+            elif (wind_speed_max < 15 and 
+                  not pd.isna(wind_speed_avg) and wind_speed_avg < 12 and 
+                  dew_point < temp_min - 2):
+                obs_color = '#f39c12'  # Orange
+                obs_status = 'Regulares'
+            # Red: otherwise
+            else:
+                obs_color = '#d95252'  # Red
+                obs_status = 'Ruins'
+        else:
+            obs_color = '#808080'  # Gray
+            obs_status = 'N/D'
+    else:
+        obs_color = '#808080'  # Gray
+        obs_status = 'N/D'
+
     info_box = html.Div([
-        html.H4("Condições Atuais", className="color-location section-header"),
         html.P([
             "Temperatura: ",
             html.Span(_format_metric(latest.get('temperature'), '.1f', '°C'), className="color-temp")
@@ -464,103 +552,134 @@ def update_dashboard(minutes, n_intervals):
             "Chuva (hora): ",
             html.Span(_format_metric(latest.get('rain_hour'), '.2f', 'mm/h'), className="color-location")
         ]),
-        html.Div([
-            dcc.Graph(
-                id='wind-rose',
-                figure=go.Figure(
-                    data=[
-                        go.Barpolar(
-                            r=[wind_rose_speed],
-                            theta=[wind_rose_dir],
-                            marker=dict(color='var(--color-wind-dir)'),
-                            width=[30],
-                            name='Direção Atual'
-                        )
-                    ],
-                    layout=go.Layout(
-                        template='plotly_dark',
-                        polar=dict(
-                            angularaxis=dict(
-                                direction='clockwise',
-                                rotation=90,
-                                tickmode='array',
-                                tickvals=[0, 45, 90, 135, 180, 225, 270, 315],
-                                ticktext=['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'],
-                                color='var(--color-location)'
-                            ),
-                            radialaxis=dict(
-                                visible=False,
-                                color='var(--color-location)'
-                            )
-                        ),
-                        showlegend=False,
-                        margin=dict(l=20, r=20, t=40, b=20),
-                        height=220,
-                        paper_bgcolor='rgba(0,0,0,0)',
-                        plot_bgcolor='rgba(0,0,0,0)'
-                    )
-                ),
-                config={'displayModeBar': False},
-                className='graph-full-height'
-            )
-        ], className='wind-rose-container'),
-        html.Hr(),
-        html.H4("Localização", className="color-location section-header"),
         html.P([
-            "Latitude: ",
-            html.Span("8° 47' 32,1\" S", className="color-location") ########## -> fix latter
-        ]),
-        html.P([
-            "Longitude: ",
-            html.Span("38° 41' 18,7\" O", className="color-location") ########## -> fix latter
-        ]),
-        html.P([
-            "Altitude: ",
-            html.Span(f"{config['ALTITUDE']} m", className="color-location")
-        ]),
-        html.P([
-            "Nascer do sol: ",
-            html.Span(f"{sunrise}", className="color-sun")
-        ]),
-        html.P([
-            "Pôr do sol: ",
-            html.Span(f"{sunset}", className="color-sun")
-        ]),
-        html.P([
-            "Fase da lua: ",
-            html.Span(get_moon_phase(), className="color-moon")
+            "Condições de Observação: ",
+            html.Span(obs_status, style={'color': obs_color, 'font-weight': 'bold'})
         ])
     ])
     
+    # Astronomical information box
+    astro_info_box = html.Div([
+        html.Div([
+            html.Div([
+                html.P([
+                    "Nascer do Sol: ",
+                    html.Span(f"{sunrise}", className="color-sun")
+                ]),
+                html.P([
+                    "Ocaso do Sol: ",
+                    html.Span(f"{sunset}", className="color-sun")
+                ])
+            ], className="astro-col-left"),
+            html.Div([
+                html.P([
+                    "Nascer da Lua: ",
+                    html.Span(f"{moonrise}", className="color-moon-time")
+                ]),
+                html.P([
+                    "Ocaso da Lua: ",
+                    html.Span(f"{moonset}", className="color-moon-time")
+                ])
+            ], className="astro-col-right")
+        ], className="astro-grid-top"),
+        html.Div([
+            html.P([
+                "Fase da Lua: ",
+                html.Span(get_moon_phase(), className="color-moon")
+            ])
+        ], className="astro-phase-bottom")
+    ])
+    
+    wind_rose_fig = go.Figure(
+        data=[
+            go.Barpolar(
+                r=[wind_rose_speed],
+                theta=[wind_rose_dir],
+                marker=dict(color='var(--color-wind-dir)'),
+                width=[30],
+                name='Direção Atual'
+            )
+        ],
+        layout=go.Layout(
+            template='plotly_dark',
+            title=dict(
+                text='<b>Direção dos Ventos</b>',
+                font=dict(size=14, color='#e0e0e0'),
+                x=0.5,
+                xanchor='center'
+            ),
+            polar=dict(
+                angularaxis=dict(
+                    direction='clockwise',
+                    rotation=90,
+                    tickmode='array',
+                    tickvals=[0, 45, 90, 135, 180, 225, 270, 315],
+                    ticktext=['N', 'NE', 'L', 'SE', 'S', 'SO', 'O', 'NO'],
+                    color='var(--color-location)'
+                ),
+                radialaxis=dict(
+                    visible=False,
+                    color='var(--color-location)'
+                )
+            ),
+            showlegend=False,
+            margin=dict(l=40, r=40, t=50, b=40),
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            height=None
+        )
+    )
+
     # Build all weather plots with consistent styling
     temp_fig = go.Figure(
-        data=[go.Scatter(
-            x=df['date'],
-            y=df['temperature'],
-            mode='lines',
-            name='Temperatura',
-            line={'color': '#ef5c42'}
-        )],
+        data=[
+            go.Scatter(
+                x=df['date'],
+                y=df['temperature'],
+                mode='lines',
+                name='Temperatura',
+                line={'color': '#ef5c42'}
+            ),
+            go.Scatter(
+                x=df['date'],
+                y=df['dew_point'],
+                mode='lines',
+                name='Ponto de Orvalho',
+                line={'color': '#aa96e3'}
+            )
+        ],
         layout={
             'template': 'plotly_dark',
-            'title': 'Temperatura (°C)',
+            'title': 'Temperatura e Ponto de Orvalho (°C)',
             'xaxis': {'title': 'Hora'},
             'yaxis': {'title': '°C'},
+            'showlegend': True,
+            'legend': {
+                'x': 0.98,
+                'y': 0.98,
+                'xanchor': 'right',
+                'yanchor': 'top',
+                'bgcolor': 'rgba(0,0,0,0)',
+                'borderwidth': 0,
+                'orientation': 'h',
+                'itemsizing': 'constant',
+                'itemwidth': 30
+            },
             'paper_bgcolor': 'rgba(0,0,0,0)',
             'plot_bgcolor': 'rgba(0,0,0,0)'
         }
     )
-    dew_fig = go.Figure(
+    rain_fig = go.Figure(
         data=[go.Scatter(x=df['date'], 
-                         y=df['dew_point'], 
+                         y=df['rain_hour'], 
                          mode='lines', 
-                         name='Ponto de Orvalho',
-                         line={'color': '#aa96e3'})],
+                         name='Chuva',
+                         line={'color': '#5eb9d2'})],
         layout={
             'template': 'plotly_dark',
-            'title': 'Ponto de Orvalho (°C)',
+            'title': 'Chuva (mm/h)',
             'xaxis': {'title': 'Hora'},
-            'yaxis': {'title': '°C'},
+            'yaxis': {'title': 'mm/h'},
             'paper_bgcolor': 'rgba(0,0,0,0)',
             'plot_bgcolor': 'rgba(0,0,0,0)'
         }
@@ -619,7 +738,14 @@ def update_dashboard(minutes, n_intervals):
             'template': 'plotly_dark',
             'title': 'Direção do Vento (°)',
             'xaxis': {'title': 'Hora'},
-            'yaxis': {'title': '°'},
+            'yaxis': {
+                'title': 'Direção (°)',
+                'range': [0, 360],
+                'fixedrange': True,
+                'tickmode': 'array',
+                'tickvals': [0, 90, 180, 270, 360],
+                'ticktext': ['N (0°)', 'L (90°)', 'S (180°)', 'O (270°)', '']
+            },
             'paper_bgcolor': 'rgba(0,0,0,0)',
             'plot_bgcolor': 'rgba(0,0,0,0)'
         }
@@ -627,13 +753,20 @@ def update_dashboard(minutes, n_intervals):
 
     return (
         info_box,
+        astro_info_box,
         temp_fig,
         hum_fig,
-        dew_fig,
+        rain_fig,
         pressure_fig,
         wind_fig,
         dir_fig,
-        html.Span(f"Status: {loop_status}", className='status-indicator', style={'color': loop_color})
+        wind_rose_fig,
+        html.Span(f"Estação Meteorológica: {loop_status}", className='status-indicator', style={'color': loop_color}),
+        html.Span(
+            f"Câmera de todo céu: {'Ativo' if get_camera_status() else 'Offline'}",
+            className='status-indicator',
+            style={'color': '#5eb9d2' if get_camera_status() else '#d95252'}
+        )
     )
 
 
@@ -646,11 +779,17 @@ def update_allsky_image(_n_intervals):
     """Update all-sky image independently and report image refresh time."""
     all_sky_url = read_allsky(config['ALLSKY_CAMERA_CONFIG'])
     image_update = datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')
-    return all_sky_url, html.Span([
-        "Última atualização da imagem:",
-        html.Br(),
-        image_update
-    ])
+    return all_sky_url, html.Span(f"Última atualização: {image_update}")
+
+
+@app.callback(
+    Output('all-sky-img', 'style'),
+    Input('brightness-slider', 'value')
+)
+def update_brightness(brightness_value):
+    """Update all-sky image brightness based on slider value."""
+    return {'filter': f'brightness({brightness_value}%)'}
+
 
 # ============================================================================
 # Application Entry Point

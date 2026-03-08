@@ -35,14 +35,18 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Solid black SVG; renders as clean black frame for offline state
+_BLACK_FRAME_URL = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="1" height="1"%3E%3Crect width="1" height="1" fill="%23000000"/%3E%3C/svg%3E'
+
 # Prevent overlapping capture attempts from periodic dashboard callbacks.
 _capture_lock = threading.Lock()
-_last_allsky_url = '/assets/logo-impacton.jpg'
+_last_allsky_url = _BLACK_FRAME_URL
 _last_capture_started_at = None
 _sun_times_cache_date = None
 _sunrise_cached = None
 _sunset_cached = None
 _last_nighttime_warning_at = None
+_camera_online = False  # Track camera connection status for dashboard
 
 
 def _latest_assets_image_url():
@@ -56,6 +60,12 @@ def _latest_assets_image_url():
     except Exception:
         cache_buster = int(datetime.datetime.now().timestamp())
     return f"/allsky/latest.jpg?t={cache_buster}"
+
+
+def get_camera_status():
+    """Return camera connection status for dashboard display."""
+    global _camera_online
+    return _camera_online
 
 
 def _format_com_error(exc):
@@ -172,7 +182,7 @@ def _call_optional_camera_method(camera, method_name, *args):
         return False
 
 
-def _normalize_dashboard_path(path_value, fallback='/assets/logo-impacton.jpg'):
+def _normalize_dashboard_path(path_value, fallback=_BLACK_FRAME_URL):
     """Normalize configured image path into a web path usable by Dash."""
     if not path_value:
         return fallback
@@ -618,7 +628,7 @@ def read_allsky(allsky_config_path):
             config = yaml.safe_load(f)
     except Exception as e:
         logger.error(f"Failed to load config: {e}")
-        return '/assets/error_placeholder.jpg'
+        return _BLACK_FRAME_URL
     
     # Check if it's nighttime
     if not _is_nighttime(config):
@@ -632,10 +642,7 @@ def read_allsky(allsky_config_path):
     # Check if ASCOM is available
     if not ASCOM_AVAILABLE:
         logger.warning("ASCOM not available - using placeholder")
-        return _normalize_dashboard_path(config.get('error_handling', {}).get(
-            'placeholder_image',
-            '/assets/error_placeholder.jpg'
-        ))
+        return _BLACK_FRAME_URL
 
     global _last_allsky_url, _last_capture_started_at
 
@@ -710,10 +717,12 @@ def read_allsky(allsky_config_path):
         # Return path for dashboard
         latest_url = _latest_assets_image_url() or f'/{img_path}'
         _last_allsky_url = latest_url
+        _camera_online = True
         return latest_url
         
     except Exception as e:
         logger.error(f"All-sky capture error: {e}")
+        _camera_online = False
         latest_url = _latest_assets_image_url()
         if latest_url:
             _last_allsky_url = latest_url
@@ -721,11 +730,8 @@ def read_allsky(allsky_config_path):
         # Return placeholder on error
         error_config = config.get('error_handling', {})
         if error_config.get('use_placeholder_on_error', True):
-            return _normalize_dashboard_path(error_config.get(
-                'placeholder_image',
-                '/assets/error_placeholder.jpg'
-            ))
-        return '/assets/error_placeholder.jpg'
+            return _BLACK_FRAME_URL
+        return _BLACK_FRAME_URL
         
     finally:
         # Disconnect camera
