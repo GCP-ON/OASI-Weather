@@ -38,7 +38,7 @@ Date: 2025
 """
 
 import dash
-from dash import html, dcc, Input, Output, State
+from dash import html, dcc, Input, Output
 import plotly.graph_objs as go
 import pandas as pd
 import numpy as np
@@ -296,8 +296,12 @@ app.layout = html.Div(
                             max=200,
                             step=5,
                             value=100,
-                            marks={50: '50%', 100: '100%', 150: '150%', 200: '200%'},
-                            tooltip={'placement': 'bottom', 'always_visible': False}
+                            marks={
+                                50: {'label': '50%', 'style': {'color': '#eef4fa'}},
+                                100: {'label': '100%', 'style': {'color': '#eef4fa'}},
+                                150: {'label': '150%', 'style': {'color': '#eef4fa'}},
+                                200: {'label': '200%', 'style': {'color': '#eef4fa'}},
+                            },
                         )
                     ], className='brightness-control')
                 ], className='all-sky-container')
@@ -1342,12 +1346,9 @@ def update_dashboard(minutes, n_intervals):
     ],
     [
         Input('allsky-interval', 'n_intervals'),
-    ],
-    [
-        State('all-sky-img', 'src'),
     ]
 )
-def update_allsky_image(_n_intervals, current_src):
+def update_allsky_image(_n_intervals):
     """Update all-sky image independently and report image refresh time."""
     all_sky_url = read_allsky(config['ALLSKY_CAMERA_CONFIG'])
     if _is_daytime_now():

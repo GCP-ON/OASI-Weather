@@ -1,7 +1,7 @@
 [project]
 name = "oasi-weather"
 version = "0.1.0"
-description = "Add your description here"
+description = "Observatory weather and all-sky monitoring dashboard (Dash + Modbus + SQLite)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

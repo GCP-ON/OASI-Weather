@@ -4,78 +4,16 @@ import struct
 import numpy as np
 import pandas as pd
 import yaml
-from enum import Enum
 
 try:
     from pymodbus.client import ModbusTcpClient
 except ImportError:
     ModbusTcpClient = None
 
-class WindDirection(Enum):
-    N = 0
-    NNE = 1
-    NE = 2
-    ENE = 3
-    E = 4
-    ESE = 5
-    SE = 6
-    SSE = 7
-    S = 8
-    SSW = 9
-    SW = 10
-    WSW = 11
-    W = 12
-    WNW = 13
-    NW = 14
-    NNW = 15
-
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
-
-def _build_mock_row(now):
-    """Generate a single mock weather data record.
-    
-    Creates synthetic weather data for testing and development purposes.
-    Values are randomly generated within reasonable meteorological ranges.
-    
-    Args:
-        now (datetime.datetime): Timestamp for this data record.
-    
-    Returns:
-        dict: Weather data record with the following keys:
-            - date: Timestamp of the record
-            - temperature: Temperature in °C (normal distribution, mean=15, std=3)
-            - humidity: Relative humidity in % (uniform 40-90)
-            - dew_point: Dew point in °C (calculated from temp and humidity)
-            - wind_speed: Wind speed in km/h (uniform 0-20)
-            - wind_dir: Wind direction in degrees (uniform 0-360)
-            - pressure: Barometric pressure in hPa (normal, mean=1013, std=8)
-            - battery_voltage: NaN (not simulated in mock)
-            - source_voltage: NaN (not simulated in mock)
-            - rain_min: NaN (not simulated in mock)
-            - rain_hour: NaN (not simulated in mock)
-            - rain_day: NaN (not simulated in mock)
-            - rain_total: NaN (not simulated in mock)
-    """
-    humidity = np.random.uniform(40, 90)
-    temperature = np.random.normal(15, 3)
-    return {
-        'date': now,
-        'temperature': temperature,
-        'humidity': humidity,
-        'dew_point': temperature - ((100 - humidity) / 5),
-        'wind_speed': np.random.uniform(0, 20),
-        'wind_dir': np.random.uniform(0, 360),
-        'pressure': np.random.normal(1013, 8),
-        'battery_voltage': np.nan,
-        'source_voltage': np.nan,
-        'rain_min': np.nan,
-        'rain_hour': np.nan,
-        'rain_day': np.nan,
-        'rain_total': np.nan,
-    }
 
 
 def _build_offline_row(now):
@@ -99,8 +37,6 @@ def _build_offline_row(now):
         'wind_speed': np.nan,
         'wind_dir': np.nan,
         'pressure': np.nan,
-        # 'battery_voltage': np.nan,
-        # 'source_voltage': np.nan,
         'rain_min': np.nan,
         'rain_hour': np.nan,
         'rain_day': np.nan,
@@ -134,35 +70,6 @@ def _format_metric(value, fmt, unit):
     if value is None or pd.isna(value):
         return '-'
     return f"{value:{fmt}} {unit}".strip()
-
-
-def generate_mock_data():
-    """Generate mock weather data for 4 days (10-min intervals)."""
-    np.random.seed(42)
-    now = datetime.datetime.now().replace(second=0, microsecond=0)
-    records = []
-    
-    for i in range(6 * 24 * 4):  # 4 days, 10 min each
-        dt = now - datetime.timedelta(minutes=10 * (6 * 24 * 4 - i - 1))
-        record = {
-            'date': dt,
-            'temperature': np.random.normal(25, 3),
-            'humidity': np.random.uniform(40, 90),
-            'wind_speed': np.random.uniform(0, 20),
-            'wind_dir': np.random.uniform(0, 360),
-            'pressure': np.random.normal(1013, 8),
-            # 'battery_voltage': np.random.normal(12.5, 0.5),
-            # 'source_voltage': np.random.normal(24, 1),
-            'rain_min': np.random.uniform(0, 0.5),
-            'rain_hour': np.random.uniform(0, 5),
-            'rain_day': np.random.uniform(0, 20),
-            'rain_total': np.random.uniform(100, 500),
-        }
-        # Calculate dew point from temperature and humidity
-        record['dew_point'] = record['temperature'] - ((100 - record['humidity']) / 5)
-        records.append(record)
-    
-    return records
 
 
 def _decode_float32(registers):

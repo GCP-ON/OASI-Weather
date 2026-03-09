@@ -355,7 +355,7 @@ body {
 
 .brightness-label {
     font-size: 0.9em;
-    color: #e0e0e0;
+    color: #f0f4f8;
     font-weight: bold;
 }
 
@@ -372,12 +372,24 @@ body {
     height: auto;
 }
 
+.brightness-control .rc-slider,
+.brightness-control .rc-slider:focus,
+.brightness-control .rc-slider:focus-visible {
+    outline: none !important;
+    background-color: transparent !important;
+}
+
+.brightness-control .rc-slider *:focus,
+.brightness-control .rc-slider *:focus-visible {
+    outline: none !important;
+}
+
 .brightness-control .rc-slider-rail {
-    background-color: #4a4a4a;
+    background-color: #9aa8b3;
 }
 
 .brightness-control .rc-slider-track {
-    background-color: #5eb9d2;
+    background-color: #a9e4f5;
 }
 
 .brightness-control .rc-slider-handle {
@@ -391,9 +403,84 @@ body {
     box-shadow: 0 0 0 5px rgba(94, 185, 210, 0.2);
 }
 
+.brightness-control .rc-slider-handle:focus,
+.brightness-control .rc-slider-handle:focus-visible,
+.brightness-control .rc-slider-handle-click-focused:focus {
+    outline: none;
+    box-shadow: 0 0 0 5px rgba(94, 185, 210, 0.22) !important;
+}
+
+.brightness-control .rc-slider-handle::after {
+    background-color: #5eb9d2 !important;
+    box-shadow: none !important;
+}
+
 .brightness-control .rc-slider-mark-text {
-    color: #a0a0a0;
+    color: #eef4fa;
     font-size: 0.8em;
+}
+
+.brightness-control .rc-slider-mark-text,
+.brightness-control .rc-slider-mark-text-active {
+    color: #eef4fa !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+}
+
+.brightness-control .rc-slider-step,
+.brightness-control .rc-slider-mark,
+.brightness-control .rc-slider-mark-text,
+.brightness-control .rc-slider-mark-text-active,
+.brightness-control .rc-slider-dot,
+.brightness-control .rc-slider-dot-active {
+    background-clip: padding-box;
+}
+
+.brightness-control .rc-slider-dot {
+    border-color: #b9c8d3;
+    background-color: #7f8d98;
+}
+
+.brightness-control .rc-slider-dot-active {
+    border-color: #d8e5ee;
+    background-color: #d8e5ee;
+}
+
+.brightness-control .rc-slider-tooltip-inner {
+    background-color: #1f2a32;
+    color: #e8f0f7;
+    border: 1px solid #3a474f;
+}
+
+.brightness-control .rc-slider-tooltip-arrow {
+    border-top-color: #1f2a32;
+}
+
+/* Dash renders slider tooltips in a portal outside the slider container. */
+.rc-slider-tooltip .rc-slider-tooltip-inner,
+.rc-tooltip .rc-tooltip-inner,
+.rc-slider-tooltip-inner {
+    background-color: #1f2a32 !important;
+    color: #e8f0f7 !important;
+    border: 1px solid #3a474f !important;
+    box-shadow: none !important;
+}
+
+.rc-slider-tooltip .rc-slider-tooltip-arrow,
+.rc-tooltip .rc-tooltip-arrow,
+.rc-slider-tooltip-arrow,
+.rc-tooltip-arrow {
+    border-color: transparent !important;
+}
+
+.rc-slider-tooltip-placement-top .rc-slider-tooltip-arrow,
+.rc-tooltip-placement-top .rc-tooltip-arrow {
+    border-top-color: #1f2a32 !important;
+}
+
+.rc-slider-tooltip-placement-bottom .rc-slider-tooltip-arrow,
+.rc-tooltip-placement-bottom .rc-tooltip-arrow {
+    border-bottom-color: #1f2a32 !important;
 }
 
 .hr-divider {
