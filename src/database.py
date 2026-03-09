@@ -252,11 +252,14 @@ class WeatherDatabase:
         logger.info(f"Bulk inserted {inserted_count} readings")
         return inserted_count
     
-    def get_readings_since(self, minutes=60):
+    def get_readings_since(self, minutes=60, max_rows=None):
         """Retrieve readings from the last N minutes.
         
         Args:
             minutes (int): Number of minutes to look back from now.
+            max_rows (int or None): Optional cap on number of newest rows
+                returned. When set, rows are selected from newest to oldest
+                and then re-ordered chronologically.
         
         Returns:
             pandas.DataFrame: Weather readings with 'date' as datetime column.
@@ -265,20 +268,38 @@ class WeatherDatabase:
             cutoff = datetime.now() - timedelta(minutes=minutes)
             
             with self._get_connection() as conn:
-                query = """
-                    SELECT 
-                        timestamp as date,
-                        temperature, humidity, dew_point,
-                        wind_speed, wind_dir, pressure,
-                        battery_voltage, source_voltage,
-                        rain_min, rain_hour, rain_day, rain_total,
-                        station_status, station_online
-                    FROM weather_readings
-                    WHERE timestamp >= ?
-                    ORDER BY timestamp ASC
-                """
-                
-                df = pd.read_sql_query(query, conn, params=(cutoff,))
+                if max_rows is not None and int(max_rows) > 0:
+                    query = """
+                        SELECT * FROM (
+                            SELECT 
+                                timestamp as date,
+                                temperature, humidity, dew_point,
+                                wind_speed, wind_dir, pressure,
+                                battery_voltage, source_voltage,
+                                rain_min, rain_hour, rain_day, rain_total,
+                                station_status, station_online
+                            FROM weather_readings
+                            WHERE timestamp >= ?
+                            ORDER BY timestamp DESC
+                            LIMIT ?
+                        ) AS recent
+                        ORDER BY recent.date ASC
+                    """
+                    df = pd.read_sql_query(query, conn, params=(cutoff, int(max_rows)))
+                else:
+                    query = """
+                        SELECT 
+                            timestamp as date,
+                            temperature, humidity, dew_point,
+                            wind_speed, wind_dir, pressure,
+                            battery_voltage, source_voltage,
+                            rain_min, rain_hour, rain_day, rain_total,
+                            station_status, station_online
+                        FROM weather_readings
+                        WHERE timestamp >= ?
+                        ORDER BY timestamp ASC
+                    """
+                    df = pd.read_sql_query(query, conn, params=(cutoff,))
                 
                 # Convert timestamp column to datetime
                 if not df.empty:

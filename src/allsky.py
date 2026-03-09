@@ -614,6 +614,8 @@ def read_allsky(allsky_config_path):
     Returns:
         str: URL/path to all-sky image for dashboard display.
     """
+    global _last_allsky_url, _last_capture_started_at, _camera_online
+
     # Load configuration
     try:
         if not os.path.isabs(allsky_config_path):
@@ -633,6 +635,7 @@ def read_allsky(allsky_config_path):
     # Check if it's nighttime
     if not _is_nighttime(config):
         logger.info("Daytime - skipping image capture")
+        _camera_online = False
         daytime_img = config.get('schedule', {}).get(
             'daytime_placeholder', 
             '/assets/daytime_placeholder.jpg'
@@ -642,9 +645,8 @@ def read_allsky(allsky_config_path):
     # Check if ASCOM is available
     if not ASCOM_AVAILABLE:
         logger.warning("ASCOM not available - using placeholder")
+        _camera_online = False
         return _BLACK_FRAME_URL
-
-    global _last_allsky_url, _last_capture_started_at
 
     camera_cfg = config.get('camera', {})
     min_interval_seconds = float(camera_cfg.get('min_capture_interval_seconds', 60))
@@ -672,6 +674,7 @@ def read_allsky(allsky_config_path):
     camera = None
     selected_device_id = None
     com_initialized = False
+    connected_this_cycle = False
     try:
         if pythoncom is None:
             raise RuntimeError("pythoncom is not available in this environment")
@@ -698,6 +701,10 @@ def read_allsky(allsky_config_path):
                 f"Tried: {device_ids}. "
                 f"Details: {connect_error}."
             )
+
+        # Connection succeeded; keep status as connected even if capture fails.
+        connected_this_cycle = True
+        _camera_online = True
         
         # Capture image
         img_array = _capture_image(camera, config)
@@ -722,7 +729,9 @@ def read_allsky(allsky_config_path):
         
     except Exception as e:
         logger.error(f"All-sky capture error: {e}")
-        _camera_online = False
+        # Only report disconnected when connection itself failed.
+        if not connected_this_cycle:
+            _camera_online = False
         latest_url = _latest_assets_image_url()
         if latest_url:
             _last_allsky_url = latest_url

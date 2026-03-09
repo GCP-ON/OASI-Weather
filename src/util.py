@@ -24,14 +24,21 @@ def get_sun_times(lat, lon):
     except Exception:
         return "N/D", "N/D"
 
-def get_moon_times(lat, lon):
+def get_moon_times(lat, lon, sunrise_str=None):
     """
     Obtém os horários aproximados de nascer e ocaso da lua hoje.
     Usa cálculo simplificado baseado na fase lunar.
+
+    Args:
+        lat (float): Latitude do observatório.
+        lon (float): Longitude do observatório.
+        sunrise_str (str, optional): Hora local do nascer do sol no formato
+            HH:MM:SS. Quando fornecida, evita nova chamada de rede.
     """
     try:
-        # Get sun times as reference
-        sunrise_str, sunset_str = get_sun_times(lat, lon)
+        # Get sun times as reference. Reuse cached sunrise when provided.
+        if sunrise_str is None:
+            sunrise_str, _sunset_str = get_sun_times(lat, lon)
         if sunrise_str == "N/D":
             return "N/D", "N/D"
         

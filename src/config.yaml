@@ -12,6 +12,7 @@ ALTITUDE: 390
 
 # Dashboard Configuration
 TIME_OPTIONS:
+  Ultimos 30 min: 30
   Ultima Hora: 60
   Ultimas 2 horas: 120
   Ultimas 6 horas: 360
@@ -21,11 +22,19 @@ TIME_OPTIONS:
   Ultimos 3 dias: 4320
   Ultimos 7 dias: 10080
 
-UPDATE_INTERVAL_SECONDS: 1
+UPDATE_INTERVAL_SECONDS: 2
 ALLSKY_UPDATE_INTERVAL_SECONDS: 30
+INPE_UPDATE_INTERVAL_SECONDS: 600
 WEATHER_FETCH_INTERVAL_SECONDS: 1
+SUN_TIMES_RETRY_SECONDS: 300  # Retry sunrise/sunset API every 5 min when cache is N/D
 IN_MEMORY_RETENTION_DAYS: 7
 MAX_PLOT_POINTS: 4000
+PLOT_TARGET_POINTS: 1200      # Keep nearly constant plot point count across time scales
+MEMORY_MAX_ROWS: 50000        # Hard cap of in-memory samples (prevents callback slowdowns)
+STARTUP_PRELOAD_LATEST_ONLY: false  # Preload history from DB on startup
+STARTUP_LOAD_MINUTES: 1440    # Start fast: preload last 24h only
+STARTUP_MAX_ROWS: 20000       # Cap rows loaded at startup
+DROPDOWN_QUERY_MAX_ROWS: 80000  # Max rows loaded from DB when changing time scale
 
 
 # Server Configuration

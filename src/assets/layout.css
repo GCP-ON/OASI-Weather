@@ -9,17 +9,27 @@ body {
     color: #e0e0e0;
 }
 
+.header-bar {
+    width: 100%;
+    background-color: #1a1a1a;
+}
+
 .header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: center;
+    gap: 10px;
     margin-bottom: 5px;
     width: 100%;
     max-width: 1700px;
     margin-left: auto;
     margin-right: auto;
     padding: 10px 0;
-    background-color: #1a1a1a;
+    background-color: transparent;
+}
+
+.header > .header-title {
+    flex: 1 1 auto;
 }
 
 .logo-img {
@@ -113,6 +123,7 @@ body {
 .status-row {
     width: 100%;
     max-width: 1700px;
+    box-sizing: border-box;
     margin: 10px auto 10px auto;
     display: flex;
     justify-content: center;
@@ -395,6 +406,7 @@ body {
 .bottom-container {
     width: 100%;
     max-width: 1700px;
+    box-sizing: border-box;
     margin: 0 auto 6px auto;
     background-color: #26313B;
     border-radius: 8px;
@@ -413,6 +425,20 @@ body {
 
 }
 
+.plot-last-update {
+    margin-top: 10px;
+    text-align: right;
+    font-size: 0.9em;
+    color: #b0b0b0;
+}
+
+.plot-update-frequency {
+    margin-top: 4px;
+    text-align: right;
+    font-size: 0.82em;
+    color: #9aa3a8;
+}
+
 .plot-col {
     width: 32%;
     height: auto;
@@ -422,7 +448,7 @@ body {
 }
 
 .plot-graph {
-    height: 290px;
+    height: 320px;
 }
 
 /* .plot-col-center {
@@ -515,6 +541,54 @@ body {
     background-color: #2f3d46;
     color: #ffffff;
 }
+
+.obs-criteria-container {
+    width: 100%;
+    max-width: 1700px;
+    box-sizing: border-box;
+    margin: 10px auto 10px auto;
+    background-color: #1f2a32;
+    border-radius: 8px;
+    box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
+    padding: 12px 18px;
+}
+
+.obs-criteria-title {
+    margin: 0 0 10px 0;
+    text-align: center;
+    font-size: 1.05em;
+    font-weight: 700;
+    color: #e6e6e6;
+}
+
+.obs-criteria-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 18px;
+}
+
+.obs-criteria-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    color: #d7d7d7;
+    font-size: 0.92em;
+    line-height: 1.35;
+}
+
+.obs-chip {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    margin-top: 2px;
+    flex: 0 0 14px;
+}
+
+.obs-chip-good { background-color: #2ecc71; }
+.obs-chip-medium { background-color: #f1c40f; }
+.obs-chip-bad { background-color: #e74c3c; }
+.obs-chip-na { background-color: #808080; }
 
 .footer {
     height: 100px;
