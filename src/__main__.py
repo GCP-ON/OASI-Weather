@@ -248,7 +248,11 @@ def serve_custom_favicon():
     favicon_path = os.path.join(os.path.dirname(__file__), 'assets', 'logo_impacton_round.png')
     if not os.path.exists(favicon_path):
         abort(404)
-    return send_file(favicon_path, mimetype='image/png', max_age=0, conditional=True)
+    response = send_file(favicon_path, mimetype='image/png', max_age=0, conditional=True)
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 
 @app.server.route('/healthz')
@@ -300,8 +304,8 @@ app.index_string = '''
     <head>
         {%metas%}
         <title>OASI-Weather</title>
-        <link rel="icon" type="image/png" href="/assets/logo_impacton_round.png">
-        <link rel="shortcut icon" type="image/png" href="/assets/logo_impacton_round.png">
+        <link rel="icon" type="image/png" href="favicon.ico?v=20260313">
+        <link rel="shortcut icon" type="image/png" href="favicon.ico?v=20260313">
         {%css%}
         <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,300&display=swap" rel="stylesheet">
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
