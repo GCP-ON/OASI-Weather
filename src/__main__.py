@@ -241,6 +241,16 @@ def serve_allsky_latest():
     return send_file(latest_path, mimetype='image/jpeg', max_age=0, conditional=True)
 
 
+@app.server.route('/_favicon.ico')
+@app.server.route('/favicon.ico')
+def serve_custom_favicon():
+    """Serve the project logo as favicon, overriding Dash default icon."""
+    favicon_path = os.path.join(os.path.dirname(__file__), 'assets', 'logo_impacton_round.png')
+    if not os.path.exists(favicon_path):
+        abort(404)
+    return send_file(favicon_path, mimetype='image/png', max_age=0, conditional=True)
+
+
 @app.server.route('/healthz')
 def healthz():
     """Lightweight runtime health snapshot for monitoring and watchdogs."""
@@ -290,10 +300,11 @@ app.index_string = '''
     <head>
         {%metas%}
         <title>OASI-Weather</title>
-        {%favicon%}
-        <link rel="icon" type="image/jpeg" href="/assets/logo-impacton_round.png">
+        <link rel="icon" type="image/png" href="/assets/logo_impacton_round.png">
+        <link rel="shortcut icon" type="image/png" href="/assets/logo_impacton_round.png">
         {%css%}
-        <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap" rel="stylesheet">
+        <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,300&display=swap" rel="stylesheet">
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
         <style>
             body {
                 background-color: #000000 !important;
@@ -506,23 +517,75 @@ app.layout = html.Div(
             html.Div([
                 html.Div([
                     html.Span('', className='obs-chip obs-chip-good'),
-                    html.Span(
-                        "Boas: Vento max (30 min) < 12 m/s e ponto de orvalho max (30 min) < temperatura minima (30 min) - 2°C."
-                    )
+                    html.Div([
+                        html.Span("Boas:"),
+                        html.Ul([
+                            html.Li([
+                                html.I(className='fa-solid fa-wind obs-criteria-icon obs-criteria-icon-good'),
+                                "Vento máximo (30 min) < 12 m/s"
+                            ]),
+                            html.Li([
+                                html.I(className='fa-solid fa-cloud-rain obs-criteria-icon obs-criteria-icon-good'),
+                                "Chuva máxima (30 min) = 0"
+                            ]),
+                            html.Li([
+                                html.I(className='fa-solid fa-temperature-low obs-criteria-icon obs-criteria-icon-good'),
+                                "Ponto de orvalho máximo (30 min) < temperatura mínima (30 min) - 2°C"
+                            ]),
+                        ])
+                    ])
                 ], className='obs-criteria-item'),
                 html.Div([
                     html.Span('', className='obs-chip obs-chip-medium'),
-                    html.Span(
-                        "Medias: Vento max (30 min) < 15 m/s, vento medio (30 min) < 12 m/s e ponto de orvalho max (30 min) < temperatura minima (30 min)."
-                    )
+                    html.Div([
+                        html.Span("Médias:"),
+                        html.Ul([
+                            html.Li([
+                                html.I(className='fa-solid fa-wind obs-criteria-icon obs-criteria-icon-medium'),
+                                "Vento máximo (30 min) >= 12 m/s"
+                            ]),
+                            html.Li([
+                                html.I(className='fa-solid fa-cloud-rain obs-criteria-icon obs-criteria-icon-medium'),
+                                "Chuva máxima (30 min) = 0"
+                            ]),
+                            html.Li([
+                                html.I(className='fa-solid fa-temperature-low obs-criteria-icon obs-criteria-icon-medium'),
+                                "Ponto de orvalho máximo (30 min) < temperatura mínima (30 min)"
+                            ]),
+                        ])
+                    ])
                 ], className='obs-criteria-item'),
                 html.Div([
                     html.Span('', className='obs-chip obs-chip-bad'),
-                    html.Span("Ruins: Qualquer condicao fora dos criterios acima.")
+                    html.Div([
+                        html.Span("Ruins:"),
+                        html.Ul([
+                            html.Li([
+                                html.I(className='fa-solid fa-wind obs-criteria-icon obs-criteria-icon-bad'),
+                                "Vento médio (30 min) >= 12 m/s"
+                            ]),
+                            html.Li([
+                                html.I(className='fa-solid fa-cloud-rain obs-criteria-icon obs-criteria-icon-bad'),
+                                "Chuva (hora) > 0"
+                            ]),
+                            html.Li([
+                                html.I(className='fa-solid fa-temperature-low obs-criteria-icon obs-criteria-icon-bad'),
+                                "Ponto de orvalho >= temperatura"
+                            ]),
+                        ])
+                    ])
                 ], className='obs-criteria-item'),
                 html.Div([
                     html.Span('', className='obs-chip obs-chip-na'),
-                    html.Span("N/D: Sem dados validos ou durante o periodo diurno.")
+                    html.Div([
+                        html.Span("N/D:"),
+                        html.Ul([
+                            html.Li([
+                                html.I(className='fa-solid fa-eye obs-criteria-icon obs-criteria-icon-na'),
+                                "Sem dados válidos ou durante o período diurno"
+                            ]),
+                        ])
+                    ])
                 ], className='obs-criteria-item'),
             ], className='obs-criteria-grid')
         ], className='obs-criteria-container'),
@@ -545,10 +608,18 @@ app.layout = html.Div(
         ),
 
         # ----------- Footer ----------- #
-        html.Footer(
-            "OASI-Weather | Observatório Astronômico do Sertão de Itaparica",
-            className="footer"
-        )
+        html.Footer([
+            html.Div("OASI-Weather | Observatório Nacional", className='footer-main'),
+            html.Div([
+                html.A("GitHub", href='https://github.com', target='_blank', rel='noopener noreferrer', className='footer-link'),
+                html.Span(" • ", className='footer-sep'),
+                html.A("Projeto IMPACTON", href='https://www.gov.br/observatorio/pt-br/assuntos/areas-de-atuacao/astronomia-e-astrofisica/oasi/impacton', target='_blank', rel='noopener noreferrer', className='footer-link'),
+                html.Span(" • ", className='footer-sep'),
+                html.A("on.br", href='https://on.br', target='_blank', rel='noopener noreferrer', className='footer-link'),
+                html.Span(" • ", className='footer-sep'),
+                html.A("MCTI", href='https://www.gov.br/mcti/pt-br', target='_blank', rel='noopener noreferrer', className='footer-link'),
+            ], className='footer-links')
+        ], className="footer")
     ]
 )
 
@@ -1157,11 +1228,11 @@ def update_dashboard(minutes, n_intervals):
         new_row['date'] = now
         loop_status = "Conectado" if latest_station_online else "Desconectado"
         loop_hint = None
-        loop_color = "#5eb9d2" if latest_station_online else "#d95252"
+        loop_color = "#5eb9d2" if latest_station_online else "#ff4d4d"
     else:
         loop_status = "Desconectado"
         loop_hint = latest_station_error
-        loop_color = "#d95252"
+        loop_color = "#ff4d4d"
         new_row = _build_offline_row(now)
 
     # Keep a high-frequency buffer for wind direction/rose visuals (2s cadence).
@@ -1282,7 +1353,8 @@ def update_dashboard(minutes, n_intervals):
         wind = row.get('wind_speed', np.nan)
         temp = row.get('temperature', np.nan)
         dew = row.get('dew_point', np.nan)
-        return (not pd.isna(wind)) and (not pd.isna(temp)) and (not pd.isna(dew))
+        rain = row.get('rain_hour', np.nan)
+        return (not pd.isna(wind)) and (not pd.isna(temp)) and (not pd.isna(dew)) and (not pd.isna(rain))
 
     # Prefer in-memory points for responsive 2s updates; DB is fallback only.
     recent_memory = [row for row in weather_data if row['date'] >= cutoff_30min]
@@ -1325,26 +1397,26 @@ def update_dashboard(minutes, n_intervals):
         wind_speeds = [row.get('wind_speed', np.nan) for row in obs_rows if not pd.isna(row.get('wind_speed', np.nan))]
         temperatures = [row.get('temperature', np.nan) for row in obs_rows if not pd.isna(row.get('temperature', np.nan))]
         dew_points = [row.get('dew_point', np.nan) for row in obs_rows if not pd.isna(row.get('dew_point', np.nan))]
+        rain_values = [row.get('rain_hour', np.nan) for row in obs_rows if not pd.isna(row.get('rain_hour', np.nan))]
         
         wind_speed_max = max(wind_speeds) if wind_speeds else np.nan
-        wind_speed_avg = np.mean(wind_speeds) if wind_speeds else np.nan
         temp_min = min(temperatures) if temperatures else np.nan
         dew_point_max = max(dew_points) if dew_points else np.nan
+        rain_max = max(rain_values) if rain_values else np.nan
         
         # Determine observation conditions color and status
-        if (not pd.isna(wind_speed_max) and not pd.isna(wind_speed_avg)
-                and not pd.isna(temp_min) and not pd.isna(dew_point_max)):
-            # Green: stricter wind and dew-point margin.
-            if wind_speed_max < 12 and dew_point_max < temp_min - 2:
+        if (not pd.isna(wind_speed_max)
+                and not pd.isna(temp_min)
+                and not pd.isna(dew_point_max)
+                and not pd.isna(rain_max)):
+            # Green: wind max below 12, no rain, and dew-point margin of 2°C.
+            if wind_speed_max < 12 and rain_max == 0 and dew_point_max < temp_min - 2:
                 obs_color = '#2ecc71'  # Green
                 obs_status = 'Boas'
-            # Yellow: acceptable wind and dew point below minimum temperature.
-            elif (wind_speed_max >= 12 and
-                wind_speed_max < 15 and 
-                  wind_speed_avg < 12 and
-                  dew_point_max < temp_min):
+            # Yellow: wind max >= 12, no rain, and dew point below minimum temperature.
+            elif wind_speed_max >= 12 and rain_max == 0 and dew_point_max < temp_min:
                 obs_color = '#f1c40f'  # Yellow
-                obs_status = 'Medias'
+                obs_status = 'Médias'
             # Red: otherwise
             else:
                 obs_color = '#e74c3c'  # Red
@@ -1433,26 +1505,32 @@ def update_dashboard(minutes, n_intervals):
 
     info_box = html.Div([
         html.P([
-            "Temperatura: ",
+            html.I(className="fa-solid fa-thermometer-half info-icon"),
+            "Temperatura:  ",
             html.Span(_format_metric(latest.get('temperature'), '.2f', '°C'), className="color-temp")
         ]),
         html.P([
+            html.I(className="fa-solid fa-droplet info-icon"),
             "Umidade: ",
             html.Span(_format_metric(latest.get('humidity'), '.2f', '%'), className="color-humidity")
         ]),
         html.P([
+            html.I(className="fa-solid fa-temperature-low info-icon"),
             "Ponto de orvalho: ",
             html.Span(_format_metric(latest.get('dew_point'), '.2f', '°C'), className="color-dew")
         ]),
         html.P([
+            html.I(className="fa-solid fa-wind info-icon"),
             "Velocidade do vento: ",
             html.Span(_format_metric(latest.get('wind_speed'), '.2f', 'm/s'), className="color-wind-speed")
         ]),
         html.P([
+            html.I(className="fa-solid fa-compass info-icon"),
             "Direção do vento: ",
             html.Span(_format_wind_dir_with_cardinal(latest.get('wind_dir')), className="color-wind-dir")
         ]),
         html.P([
+            html.I(className="fa-solid fa-gauge-high info-icon"),
             "Pressão: ",
             html.Span(_format_metric(latest.get('pressure'), '.2f', 'hPa'), className="color-location")
         ]),
@@ -1461,10 +1539,12 @@ def update_dashboard(minutes, n_intervals):
         #     html.Span(_format_metric(latest.get('battery_voltage'), '.2f', 'V'), className="color-location")
         # ]),
         html.P([
+            html.I(className="fa-solid fa-cloud-rain info-icon"),
             "Chuva (hora): ",
             html.Span(_format_metric(latest.get('rain_hour'), '.2f', 'mm/h'), className="color-location")
         ]),
         html.P([
+            html.I(className="fa-solid fa-eye info-icon"),
             "Condições de Observação: ",
             html.Span(
                 '',
@@ -1494,20 +1574,24 @@ def update_dashboard(minutes, n_intervals):
         html.Div([
             html.Div([
                 html.P([
+                    html.I(className="fa-solid fa-sun info-icon"),
                     "Nascer do Sol: ",
                     html.Span(f"{sunrise}", className="color-sun")
                 ]),
                 html.P([
+                    html.I(className="fa-solid fa-sun info-icon"),
                     "Ocaso do Sol: ",
                     html.Span(f"{sunset}", className="color-sun")
                 ])
             ], className="astro-col-left"),
             html.Div([
                 html.P([
+                    html.I(className="fa-solid fa-moon info-icon"),
                     "Nascer da Lua: ",
                     html.Span(f"{moonrise}", className="color-moon-time")
                 ]),
                 html.P([
+                    html.I(className="fa-solid fa-moon info-icon"),
                     "Ocaso da Lua: ",
                     html.Span(f"{moonset}", className="color-moon-time")
                 ])
@@ -1525,6 +1609,13 @@ def update_dashboard(minutes, n_intervals):
     sampled_speeds = np.array([p['speed'] for p in sampled_points], dtype=float)
     top5_dirs = np.array([p['dir'] for p in top5_points], dtype=float)
     top5_speeds = np.array([p['speed'] for p in top5_points], dtype=float)
+    wind_colorscale = [
+        [0.0, '#1f3b73'],
+        [0.25, '#2f78c4'],
+        [0.5, '#44c4e0'],
+        [0.75, '#f2c94c'],
+        [1.0, '#e76f51'],
+    ]
 
     wind_rose_data = [
         go.Barpolar(
@@ -1534,22 +1625,31 @@ def update_dashboard(minutes, n_intervals):
             width=np.full_like(sampled_dirs, 3.0),
             marker=dict(
                 color=sampled_speeds,
-                colorscale='Turbo',
+                colorscale=wind_colorscale,
                 cmin=0,
                 cmax=15,
                 showscale=True,
                 colorbar=dict(
-                    title='Velocidade (m/s)',
+                    title=dict(
+                        text='Velocidade (m/s)',
+                        font=dict(color='#d4e1ee', size=14),
+                    ),
                     orientation='h',
                     x=0.5,
                     xanchor='center',
-                    y=-0.22,
+                    y=-0.16,
                     yanchor='top',
-                    len=0.9,
+                    len=0.82,
                     thickness=16,
+                    bgcolor='rgba(0, 0, 0, 0)',
+                    tickcolor='#9db3ca',
+                    tickfont=dict(color='#c8d7e7', size=13),
+                    outlinecolor='rgba(118, 147, 173, 0.38)',
+                    outlinewidth=1,
                 ),
+                line=dict(color='rgba(177, 203, 224, 0.18)', width=0.4),
             ),
-            opacity=0.72,
+            opacity=0.66,
             name='Amostra aleatória (30 min)',
             hovertemplate='Direção: %{theta:.0f}°<br>Velocidade: %{marker.color:.1f} m/s<extra></extra>',
         )
@@ -1561,15 +1661,16 @@ def update_dashboard(minutes, n_intervals):
                 # Rays for top-5 speeds.
                 r=np.ones_like(top5_dirs),
                 theta=top5_dirs,
-                width=np.full_like(top5_dirs, 3.0),
+                width=np.full_like(top5_dirs, 2.2),
                 marker=dict(
                     color=top5_speeds,
-                    colorscale='Turbo',
+                    colorscale=wind_colorscale,
                     cmin=0,
                     cmax=15,
                     showscale=False,
+                    line=dict(color='rgba(224, 236, 247, 0.25)', width=0.8),
                 ),
-                opacity=0.95,
+                opacity=0.88,
                 hoverinfo='skip',
                 showlegend=False,
             )
@@ -1581,10 +1682,10 @@ def update_dashboard(minutes, n_intervals):
                 theta=top5_dirs,
                 mode='markers',
                 marker=dict(
-                    size=12,
-                    color='#ffe08a',
-                    symbol='diamond',
-                    line=dict(color='#1f1f1f', width=1.4),
+                    size=11,
+                    color='rgba(0, 0, 0, 0)',
+                    symbol='circle',
+                    line=dict(color='#d0a079', width=2.2),
                 ),
                 name='Top 5 velocidade',
                 hovertemplate='Top 5<br>Direção: %{theta:.0f}°<br>Velocidade: %{customdata:.1f} m/s<extra></extra>',
@@ -1600,7 +1701,7 @@ def update_dashboard(minutes, n_intervals):
                 r=[0.0, 1.0],
                 theta=[avg_dir_30min, avg_dir_30min],
                 mode='lines',
-                line=dict(color='rgba(255, 255, 255, 0.26)', width=10),
+                line=dict(color='rgba(152, 190, 223, 0.24)', width=14),
                 hoverinfo='skip',
                 showlegend=False,
             )
@@ -1611,12 +1712,12 @@ def update_dashboard(minutes, n_intervals):
                 r=[0.0, 1.0],
                 theta=[avg_dir_30min, avg_dir_30min],
                 mode='lines+markers',
-                line=dict(color='#ffffff', width=3),
+                line=dict(color='#a9c8e4', width=2.5, dash='dot'),
                 marker=dict(
-                    size=[0, 11],
-                    color=['rgba(0,0,0,0)', '#ffffff'],
+                    size=[0, 10],
+                    color=['rgba(0,0,0,0)', '#a9c8e4'],
                     symbol=['circle', 'circle'],
-                    line=dict(color='#0f1115', width=1.6),
+                    line=dict(color='#102132', width=1.4),
                 ),
                 name='Direção média (30 min)',
                 hovertemplate='Direção média 30 min: %{theta:.0f}°<extra></extra>',
@@ -1630,13 +1731,14 @@ def update_dashboard(minutes, n_intervals):
                 # Ray for latest reading.
                 r=[1.0],
                 theta=[latest_point['dir']],
-                width=[3.0],
+                width=[2.5],
                 marker=dict(
                     color=[latest_point['speed']],
-                    colorscale='Turbo',
+                    colorscale=wind_colorscale,
                     cmin=0,
                     cmax=15,
                     showscale=False,
+                    line=dict(color='rgba(232, 240, 247, 0.35)', width=1.0),
                 ),
                 opacity=0.98,
                 hoverinfo='skip',
@@ -1650,10 +1752,10 @@ def update_dashboard(minutes, n_intervals):
                 theta=[latest_point['dir']],
                 mode='markers',
                 marker=dict(
-                    size=15,
-                    color='#ff4d4d',
-                    symbol='star-diamond',
-                    line=dict(color='#111111', width=1.5),
+                    size=14,
+                    color='#54d6c8',
+                    symbol='circle',
+                    line=dict(color='#315574', width=2.2),
                 ),
                 name='Leitura mais recente',
                 hovertemplate='Mais recente<br>Direção: %{theta:.0f}°<br>Velocidade: %{customdata:.1f} m/s<extra></extra>',
@@ -1667,8 +1769,8 @@ def update_dashboard(minutes, n_intervals):
         layout=go.Layout(
             template='plotly_dark',
             title=dict(
-                text='<b>Direção dos Ventos (Últimos 30 min)</b>',
-                font=dict(size=14, color='#e0e0e0'),
+                text="<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf72e</span>&nbsp;&nbsp;Direção dos Ventos · Últimos 30 min",
+                font=dict(size=17, color='#dbe8f5'),
                 x=0.5,
                 xanchor='center'
             ),
@@ -1679,22 +1781,45 @@ def update_dashboard(minutes, n_intervals):
                     tickmode='array',
                     tickvals=[0, 45, 90, 135, 180, 225, 270, 315],
                     ticktext=['N', 'NE', 'L', 'SE', 'S', 'SO', 'O', 'NO'],
-                    color='#e0e0e0'
+                    tickfont=dict(color='#c5d8ea', size=13),
+                    gridcolor='rgba(133, 161, 185, 0.22)',
+                    linecolor='rgba(126, 98, 77, 0.42)',
+                    color='#d8e4f0'
                 ),
                 radialaxis=dict(
-                    range=[0, 1],
+                    range=[0, 1.05],
                     showticklabels=False,
                     ticks='',
-                    showline=False,
-                    color='#e0e0e0'
+                    showline=True,
+                    gridcolor='rgba(133, 161, 185, 0.16)',
+                    linecolor='rgba(126, 98, 77, 0.3)',
+                    color='#d8e4f0'
                 )
             ),
             showlegend=False,
-            margin=dict(l=40, r=40, t=50, b=88),
+            margin=dict(l=36, r=28, t=58, b=86),
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
             height=None
         )
+    )
+
+    plot_theme = dict(
+        font=dict(family='DM Sans, Inter, Segoe UI, sans-serif', size=12, color='#d8e4f0'),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=56, r=20, t=72, b=44),
+        hoverlabel=dict(bgcolor='rgba(14, 23, 34, 0.96)', bordercolor='#4a6078', font=dict(color='#ebf2f9')),
+    )
+    axis_theme = dict(
+        showgrid=True,
+        gridcolor='rgba(120, 146, 170, 0.2)',
+        zeroline=False,
+        color='#c8d7e7',
+        showline=True,
+        linecolor='rgba(166, 126, 92, 0.45)',
+        ticks='outside',
+        tickcolor='rgba(154, 180, 204, 0.55)',
     )
 
     # Build all weather plots with consistent styling
@@ -1717,19 +1842,19 @@ def update_dashboard(minutes, n_intervals):
         ],
         layout={
             'template': 'plotly_dark',
-            'title': 'Temperatura e Ponto de Orvalho (°C)',
+            'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf2c9</span>&nbsp;&nbsp;Temperatura e Ponto de Orvalho (°C)",
             # Preserve legend visibility toggles across interval refreshes.
             # Reset only when the selected time range changes.
             'uirevision': f'temp-dew-{int(minutes)}',
             'xaxis': {'title': 'Hora'},
-            # Keep a top band free so the legend does not overlap plotted lines.
-            'yaxis': {'title': '°C', 'domain': [0.0, 0.86]},
+            'yaxis': {'title': '°C'},
             'showlegend': True,
             'legend': {
                 'x': 0.5,
-                'y': 0.99,
+                'y': 1.005,
                 'xanchor': 'center',
-                'yanchor': 'top',
+                'yanchor': 'bottom',
+                'font': {'size': 13, 'color': '#d8e4f0'},
                 'bgcolor': 'rgba(0,0,0,0)',
                 'borderwidth': 0,
                 'orientation': 'h',
@@ -1748,7 +1873,7 @@ def update_dashboard(minutes, n_intervals):
                          line={'color': '#4cc9f0'})],
         layout={
             'template': 'plotly_dark',
-            'title': 'Chuva por Hora (mm/h)',
+            'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf73d</span>&nbsp;&nbsp;Chuva por Hora (mm/h)",
             'uirevision': f'rain-{int(minutes)}',
             'xaxis': {'title': 'Hora'},
             'yaxis': {'title': 'mm/h'},
@@ -1764,7 +1889,7 @@ def update_dashboard(minutes, n_intervals):
                          line={'color': '#47b0d3'})],
         layout={
             'template': 'plotly_dark',
-            'title': 'Umidade (%)',
+            'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf043</span>&nbsp;&nbsp;Umidade (%)",
             'uirevision': f'humidity-{int(minutes)}',
             'xaxis': {'title': 'Hora'},
             'yaxis': {'title': '%'},
@@ -1779,7 +1904,7 @@ def update_dashboard(minutes, n_intervals):
                          name='Pressão Atmosférica')],
         layout={
             'template': 'plotly_dark',
-            'title': 'Pressão Atmosférica (hPa)',
+            'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf625</span>&nbsp;&nbsp;Pressão Atmosférica (hPa)",
             'uirevision': f'pressure-{int(minutes)}',
             'xaxis': {'title': 'Hora'},
             'yaxis': {'title': 'hPa'},
@@ -1802,31 +1927,24 @@ def update_dashboard(minutes, n_intervals):
                 y=np.full(len(df), 12.0),
                 mode='lines',
                 name='12 m/s',
-                line={'color': '#f1c40f', 'width': 2, 'dash': 'dash'}
-            ),
-            go.Scatter(
-                x=df['date'],
-                y=np.full(len(df), 15.0),
-                mode='lines',
-                name='15 m/s',
                 line={'color': '#e74c3c', 'width': 2, 'dash': 'dash'}
             )
         ],
         layout={
             'template': 'plotly_dark',
-            'title': 'Velocidade do Vento (m/s)',
+            'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf72e</span>&nbsp;&nbsp;Velocidade do Vento (m/s)",
             # Preserve legend visibility toggles across interval refreshes.
             # Reset only when the selected time range changes.
             'uirevision': f'wind-speed-{int(minutes)}',
             'xaxis': {'title': 'Hora'},
-            # Keep a top band free so the legend does not overlap plotted lines.
-            'yaxis': {'title': 'm/s', 'domain': [0.0, 0.86]},
+            'yaxis': {'title': 'm/s'},
             'showlegend': True,
             'legend': {
                 'x': 0.5,
-                'y': 0.99,
+                'y': 1.005,
                 'xanchor': 'center',
-                'yanchor': 'top',
+                'yanchor': 'bottom',
+                'font': {'size': 13, 'color': '#d8e4f0'},
                 'bgcolor': 'rgba(0,0,0,0)',
                 'borderwidth': 0,
                 'orientation': 'h',
@@ -1850,7 +1968,7 @@ def update_dashboard(minutes, n_intervals):
                          line={'color': '#7fd1b9'})],
         layout={
             'template': 'plotly_dark',
-            'title': 'Direção do Vento (°)',
+            'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf14e</span>&nbsp;&nbsp;Direção do Vento (°)",
             'uirevision': f'wind-dir-{int(minutes)}',
             'xaxis': {'title': 'Hora'},
             'yaxis': {
@@ -1864,6 +1982,34 @@ def update_dashboard(minutes, n_intervals):
             'paper_bgcolor': 'rgba(0,0,0,0)',
             'plot_bgcolor': 'rgba(0,0,0,0)'
         }
+    )
+
+    for figure in (temp_fig, hum_fig, rain_fig, pressure_fig, wind_fig, dir_fig):
+        figure.update_layout(**plot_theme)
+        figure.update_layout(title=dict(pad=dict(b=14)))
+        figure.update_xaxes(**axis_theme, title_font=dict(color='#a9bdd3'))
+        figure.update_yaxes(**axis_theme, title_font=dict(color='#a9bdd3'))
+
+    wind_rose_fig.update_layout(**plot_theme)
+    wind_rose_fig.update_layout(
+        margin=dict(l=40, r=36, t=76, b=96),
+        title=dict(font=dict(size=17, color='#dbe8f5'), pad=dict(b=14)),
+    )
+    wind_rose_fig.update_polars(
+        bgcolor='rgba(0,0,0,0)',
+        angularaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(133, 161, 185, 0.22)',
+            linecolor='rgba(126, 98, 77, 0.42)',
+            color='#d2dfee',
+            tickfont=dict(color='#c7d8ea', size=13),
+        ),
+        radialaxis=dict(
+            showgrid=True,
+            gridcolor='rgba(133, 161, 185, 0.16)',
+            linecolor='rgba(126, 98, 77, 0.3)',
+            color='#c7d8ea',
+        ),
     )
 
     camera_connected = get_camera_status()
