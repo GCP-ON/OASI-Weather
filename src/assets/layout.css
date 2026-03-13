@@ -108,8 +108,8 @@ body {
     margin-right: 6px;
     color: #d0d0d0;
     line-height: 1;
-    font-family: "Segoe UI Symbol", "Noto Sans Symbols2", sans-serif;
-    font-variant-emoji: text;
+    display: inline-flex;
+    align-items: center;
 }
 
 .location-text {

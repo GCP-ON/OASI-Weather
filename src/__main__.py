@@ -354,7 +354,7 @@ app.layout = html.Div(
                         className="header-title"
                     ),
                     html.Div([
-                        html.Span("📍︎", className="location-icon"),
+                        html.I(className="fa-solid fa-location-dot location-icon"),
                         html.Span("8° 47' 32,1\" S, 38° 41' 18,7\" O, 390 m", className="location-text")
                     ], className="header-location")
                 ], className="header-title"),
