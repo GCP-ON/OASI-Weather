@@ -11,7 +11,7 @@ The dashboard displays:
     - Wind rose visualization
     - All-sky camera live view
     - Sun/moon information (sunrise, sunset, moon phase)
-    - Embedded external services (INPE satellite, WeatherBug)
+    - Embedded external services (INPE satellite and forecast)
 
 Modbus Communication:
     Weather station data is read via Modbus TCP protocol using register mappings
@@ -43,14 +43,23 @@ import plotly.graph_objs as go
 import pandas as pd
 import numpy as np
 import datetime
+import time
+import json
+import re
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import yaml
-from flask import send_file, abort, request
+from flask import send_file, abort, request, jsonify
+from urllib import request as urlrequest, parse as urlparse
+import xml.etree.ElementTree as ET
 from .util import get_moon_phase, get_sun_times, get_moon_times
 from .weatherstation import read_weather_station, _build_offline_row, _format_metric
 from .allsky import read_allsky, get_camera_status
 from .database import WeatherDatabase, get_yearly_db_path
 import os
+
+
+DEFAULT_BLACK_FRAME_URL = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="1" height="1"%3E%3Crect width="1" height="1" fill="%23000000"/%3E%3C/svg%3E'
 
 # ============================================================================
 # Global State Variables
@@ -83,7 +92,56 @@ station_future = None
 latest_station_row = None
 latest_station_status = "Desconectado"
 latest_station_online = False
+latest_station_error = None
 last_station_poll = None
+station_future_started_at = None
+station_fail_streak = 0
+station_backoff_seconds = 1.0
+
+# Async all-sky acquisition state (prevents camera I/O from blocking callback).
+allsky_executor = ThreadPoolExecutor(max_workers=1)
+allsky_future = None
+allsky_future_started_at = None
+last_allsky_poll = None
+latest_allsky_url = DEFAULT_BLACK_FRAME_URL
+latest_allsky_updated_at = None
+latest_allsky_error = None
+allsky_fail_streak = 0
+allsky_backoff_seconds = 30.0
+
+# INPE forecast cache (used by the forecast card in the left grid)
+inpe_forecast_cache = None
+inpe_forecast_last_fetch = None
+
+# Dashboard callback guard/cache to prevent interval request pileups.
+dashboard_busy_until = None
+dashboard_last_started_at = None
+dashboard_last_completed_at = None
+dashboard_last_error_at = None
+dashboard_last_error = None
+dashboard_cached_outputs = None
+dashboard_last_duration_seconds = None
+dashboard_duration_samples = deque(maxlen=180)
+
+# Cache for long-range windows (e.g. 7d) so interval ticks do not fall back
+# to the shorter in-memory retention and visually reset the selected scale.
+range_cache_minutes = None
+range_cache_records = []
+range_cache_loaded_at = None
+last_selected_minutes = 30
+
+
+def _estimate_optimal_refresh_seconds():
+    """Estimate a safe dashboard refresh from p95 callback duration.
+
+    Uses a 60% target callback utilization to avoid overlap/pileups:
+    interval >= p95 / 0.60
+    """
+    if len(dashboard_duration_samples) < 8:
+        return None, None
+    p95_seconds = float(np.percentile(np.array(dashboard_duration_samples), 95))
+    recommended_seconds = max(3, int(np.ceil(p95_seconds / 0.60)))
+    return p95_seconds, recommended_seconds
 
 # ============================================================================
 # Server and Observatory Configuration Loading
@@ -103,7 +161,23 @@ STARTUP_LOAD_MINUTES = int(config.get('STARTUP_LOAD_MINUTES', 1440))
 STARTUP_MAX_ROWS = int(config.get('STARTUP_MAX_ROWS', 20000))
 DROPDOWN_QUERY_MAX_ROWS = int(config.get('DROPDOWN_QUERY_MAX_ROWS', 80000))
 PLOT_TARGET_POINTS = int(config.get('PLOT_TARGET_POINTS', 1200))
-INPE_UPDATE_INTERVAL_SECONDS = int(config.get('INPE_UPDATE_INTERVAL_SECONDS', 600))
+INPE_UPDATE_INTERVAL_SECONDS = int(config.get('INPE_UPDATE_INTERVAL_SECONDS', 2))
+INPE_FETCH_MIN_INTERVAL_SECONDS = int(config.get('INPE_FETCH_MIN_INTERVAL_SECONDS', 300))
+STATION_FUTURE_TIMEOUT_SECONDS = float(config.get('STATION_FUTURE_TIMEOUT_SECONDS', 8.0))
+STATION_MAX_BACKOFF_SECONDS = float(config.get('STATION_MAX_BACKOFF_SECONDS', 60.0))
+ALLSKY_MIN_FETCH_INTERVAL_SECONDS = float(
+    config.get(
+        'ALLSKY_MIN_FETCH_INTERVAL_SECONDS',
+        config.get('ALLSKY_UPDATE_INTERVAL_SECONDS', config.get('UPDATE_INTERVAL_SECONDS', 30)),
+    )
+)
+ALLSKY_FETCH_TIMEOUT_SECONDS = float(config.get('ALLSKY_FETCH_TIMEOUT_SECONDS', 240.0))
+ALLSKY_MAX_BACKOFF_SECONDS = float(config.get('ALLSKY_MAX_BACKOFF_SECONDS', 600.0))
+DASHBOARD_BUSY_GUARD_SECONDS = float(config.get('DASHBOARD_BUSY_GUARD_SECONDS', 8.0))
+LONG_RANGE_CACHE_REFRESH_SECONDS = int(config.get('LONG_RANGE_CACHE_REFRESH_SECONDS', 30))
+
+station_backoff_seconds = WEATHER_FETCH_INTERVAL_SECONDS
+allsky_backoff_seconds = ALLSKY_MIN_FETCH_INTERVAL_SECONDS
 
 # Initialize database with yearly file pattern
 db_pattern = config.get('DATABASE_PATH_PATTERN', 'weather_data_{year}.db')
@@ -166,6 +240,49 @@ def serve_allsky_latest():
         abort(404)
     return send_file(latest_path, mimetype='image/jpeg', max_age=0, conditional=True)
 
+
+@app.server.route('/healthz')
+def healthz():
+    """Lightweight runtime health snapshot for monitoring and watchdogs."""
+    now = datetime.datetime.now()
+
+    def _age_seconds(value):
+        if value is None:
+            return None
+        try:
+            return int((now - value).total_seconds())
+        except Exception:
+            return None
+
+    payload = {
+        'time': now.isoformat(),
+        'station_online': bool(latest_station_online),
+        'station_fail_streak': int(station_fail_streak),
+        'station_backoff_seconds': float(station_backoff_seconds),
+        'station_last_poll_age_seconds': _age_seconds(last_station_poll),
+        'allsky_fail_streak': int(allsky_fail_streak),
+        'allsky_backoff_seconds': float(allsky_backoff_seconds),
+        'allsky_last_update_age_seconds': _age_seconds(latest_allsky_updated_at),
+        'dashboard_busy': bool(dashboard_busy_until is not None and now < dashboard_busy_until),
+        'dashboard_last_started_age_seconds': _age_seconds(dashboard_last_started_at),
+        'dashboard_last_completed_age_seconds': _age_seconds(dashboard_last_completed_at),
+        'dashboard_last_error': dashboard_last_error,
+        'dashboard_last_error_age_seconds': _age_seconds(dashboard_last_error_at),
+        'dashboard_last_duration_seconds': (
+            round(float(dashboard_last_duration_seconds), 3)
+            if dashboard_last_duration_seconds is not None
+            else None
+        ),
+        'dashboard_samples_count': int(len(dashboard_duration_samples)),
+    }
+
+    p95_seconds, recommended_seconds = _estimate_optimal_refresh_seconds()
+    payload['dashboard_p95_duration_seconds'] = (
+        round(float(p95_seconds), 3) if p95_seconds is not None else None
+    )
+    payload['dashboard_recommended_refresh_seconds'] = recommended_seconds
+    return jsonify(payload)
+
 # 
 app.index_string = '''
 <!DOCTYPE html>
@@ -202,9 +319,14 @@ app.layout = html.Div(
         html.Div([
             html.Div([
                 # Logo on the left
-                html.Img(
-                    src='https://github.com/GCP-ON/OASI-Weather/blob/master/src/assets/logo-impacton_round.png?raw=true',
-                    className="logo-img"
+                html.A(
+                    html.Img(
+                        src='/assets/logo-impacton_round.png',
+                        className="logo-img"
+                    ),
+                    href='https://www.gov.br/observatorio/pt-br/assuntos/areas-de-atuacao/astronomia-e-astrofisica/oasi/impacton',
+                    target='_blank',
+                    rel='noopener noreferrer'
                 ),
                 # Title and subtitle in the center
                 html.Div([
@@ -222,9 +344,14 @@ app.layout = html.Div(
                     ], className="header-location")
                 ], className="header-title"),
                 # Logo ON on the right
-                html.Img(
-                    src='/assets/logo-on_round.png',
-                    className="logo-on-img"
+                html.A(
+                    html.Img(
+                        src='/assets/logo-on_round.png',
+                        className="logo-on-img"
+                    ),
+                    href='https://on.br',
+                    target='_blank',
+                    rel='noopener noreferrer'
                 )
             ], className="header")
         ], className="header-bar"),
@@ -235,8 +362,8 @@ app.layout = html.Div(
                 id='loop-status',
                 className="loop-status-box",
                 children=[
-                    html.Div(id='loop-active-indicator'),
-                    html.Div(id='camera-status-indicator')
+                    html.Div('Estação Meteorológica: carregando...', id='loop-active-indicator'),
+                    html.Div('Câmera de todo céu: carregando...', id='camera-status-indicator')
                 ]
             )
         ], className="status-row"),
@@ -260,11 +387,12 @@ app.layout = html.Div(
                 html.Div([
                     html.Div(id='astro-info-box', className="astro-info-box")
                 ], className="grid-card astro-card"),
-                # Row 3: WeatherBug and INPE
+                # Row 3: INPE forecast and INPE satellite
                 html.Div([
-                    html.Iframe(
-                        src=f"https://lxapp.weatherbug.net/v2/lxapp_impl.html?lat={config['LATITUDE']}&lon={config['LONGITUDE']}&tv=1.8.1&nocache=1",
-                        className="weatherbug-iframe"
+                    html.Div(
+                        id='inpe-forecast-box',
+                        className='inpe-forecast-wrapper',
+                        children=html.Span('Carregando previsao CPTEC/INPE...')
                     )
                 ], className="grid-card iframe-card"),
                 html.Div([
@@ -292,15 +420,26 @@ app.layout = html.Div(
                         html.Label('Brilho:', className='brightness-label'),
                         dcc.Slider(
                             id='brightness-slider',
-                            min=50,
-                            max=200,
-                            step=5,
-                            value=100,
+                            min=5,
+                            max=1000,
+                            step=25,
+                            value=500,
                             marks={
-                                50: {'label': '50%', 'style': {'color': '#eef4fa'}},
+#                                50: {'label': '50%', 'style': {'color': '#eef4fa'}},
                                 100: {'label': '100%', 'style': {'color': '#eef4fa'}},
-                                150: {'label': '150%', 'style': {'color': '#eef4fa'}},
-                                200: {'label': '200%', 'style': {'color': '#eef4fa'}},
+#                                150: {'label': '150%', 'style': {'color': '#eef4fa'}},
+#                                200: {'label': '200%', 'style': {'color': '#eef4fa'}},
+#                                250: {'label': '250%', 'style': {'color': '#eef4fa'}},
+                                300: {'label': '300%', 'style': {'color': '#eef4fa'}},
+#                                350: {'label': '350%', 'style': {'color': '#eef4fa'}},
+#                                400: {'label': '400%', 'style': {'color': '#eef4fa'}},
+#                                450: {'label': '450%', 'style': {'color': '#eef4fa'}},
+                                500: {'label': '500%', 'style': {'color': '#eef4fa'}},
+#                                600: {'label': '600%', 'style': {'color': '#eef4fa'}},
+                                700: {'label': '700%', 'style': {'color': '#eef4fa'}},
+#                                800: {'label': '800%', 'style': {'color': '#eef4fa'}},
+                                900: {'label': '900%', 'style': {'color': '#eef4fa'}},
+#                                1000: {'label': '1000%', 'style': {'color': '#eef4fa'}},
                             },
                         )
                     ], className='brightness-control')
@@ -322,9 +461,11 @@ app.layout = html.Div(
                         options=[
                             {'label': k, 'value': v} for k, v in config['TIME_OPTIONS'].items()
                         ],
-                        value=60,
+                        value=30,
                         searchable=False,
                         clearable=False,
+                        persistence=True,
+                        persistence_type='local',
                         className="time-selector-dropdown"
                     )
                 ], className="time-selector-box"),
@@ -337,7 +478,7 @@ app.layout = html.Div(
                     dcc.Graph(id='temperature-plot', className='plot-graph'),
                     dcc.Graph(id='pressure-plot', className='plot-graph'),
                 ], className="plot-col"),
-                # Center column: humidity and dew point
+                # Center column: humidity and rain
                 html.Div([
                     dcc.Graph(id='humidity-plot', className='plot-graph'),
                     dcc.Graph(id='dew-point-plot', className='plot-graph'),
@@ -399,7 +540,7 @@ app.layout = html.Div(
         ),
         dcc.Interval(
             id='inpe-interval',
-            interval=max(60, INPE_UPDATE_INTERVAL_SECONDS) * 1000,
+            interval=max(1, INPE_UPDATE_INTERVAL_SECONDS) * 1000,
             n_intervals=0
         ),
 
@@ -481,10 +622,51 @@ def _compute_daytime_state(sunrise, sunset):
 
 def _start_station_fetch(station_config_path):
     """Submit a non-blocking weather station read if worker is idle."""
-    global station_future, last_station_poll
+    global station_future, last_station_poll, station_future_started_at
     if station_future is None:
         station_future = station_executor.submit(read_weather_station, station_config_path)
         last_station_poll = datetime.datetime.now()
+        station_future_started_at = last_station_poll
+
+
+def _reset_station_executor():
+    """Replace the station worker when an in-flight poll gets stuck."""
+    global station_executor, station_future, station_future_started_at
+
+    old_executor = station_executor
+    station_executor = ThreadPoolExecutor(max_workers=1)
+    station_future = None
+    station_future_started_at = None
+
+    try:
+        old_executor.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        # Older Python may not support cancel_futures.
+        old_executor.shutdown(wait=False)
+
+
+def _start_allsky_fetch(allsky_config_path):
+    """Submit a non-blocking all-sky read when worker is idle."""
+    global allsky_future, allsky_future_started_at, last_allsky_poll
+    if allsky_future is None:
+        allsky_future = allsky_executor.submit(read_allsky, allsky_config_path)
+        last_allsky_poll = datetime.datetime.now()
+        allsky_future_started_at = last_allsky_poll
+
+
+def _reset_allsky_executor():
+    """Replace the all-sky worker when a capture cycle gets stuck."""
+    global allsky_executor, allsky_future, allsky_future_started_at
+
+    old_executor = allsky_executor
+    allsky_executor = ThreadPoolExecutor(max_workers=1)
+    allsky_future = None
+    allsky_future_started_at = None
+
+    try:
+        old_executor.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        old_executor.shutdown(wait=False)
 
 
 def _downsample_dataframe(df, target_points):
@@ -509,6 +691,282 @@ def _build_inpe_url(now=None):
         f"&product_opacity=1&date={date_param}&zoom=6&x=4501.7596&y=3177.0654"
         "&animate=true&t=350.00"
     )
+
+
+def _safe_float(value):
+    """Parse a numeric value into float, returning NaN for invalid values."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float('nan')
+
+
+def _fetch_json(url, timeout_seconds=8):
+    """Fetch a JSON payload from a URL using a small timeout."""
+    req = urlrequest.Request(url, headers={'User-Agent': 'OASI-Weather/1.0'})
+    with urlrequest.urlopen(req, timeout=timeout_seconds) as response:
+        charset = response.headers.get_content_charset() or 'utf-8'
+        payload = response.read().decode(charset, errors='replace')
+    return json.loads(payload)
+
+
+def _fetch_xml(url, timeout_seconds=8):
+    """Fetch XML and return the parsed root element."""
+    req = urlrequest.Request(url, headers={'User-Agent': 'OASI-Weather/1.0'})
+    with urlrequest.urlopen(req, timeout=timeout_seconds) as response:
+        payload = response.read()
+    return ET.fromstring(payload)
+
+
+def _fetch_weather_channel_cloud_cover_pct(latitude, longitude, timeout_seconds=8):
+    """Fetch cloud cover percentage from Weather Channel hourly page."""
+    base_url = f"https://weather.com/weather/hourbyhour/l/{latitude},{longitude}"
+    req = urlrequest.Request(
+        base_url,
+        headers={
+            'User-Agent': 'OASI-Weather/1.0',
+            'Accept-Language': 'en-US,en;q=0.9,pt-BR;q=0.8',
+        },
+    )
+    with urlrequest.urlopen(req, timeout=timeout_seconds) as response:
+        charset = response.headers.get_content_charset() or 'utf-8'
+        payload = response.read().decode(charset, errors='replace')
+
+    patterns = [
+        r'Cloud\s*Cover\s*(\d{1,3})\s*%',
+        r'Cobertura\s*de\s*nuvens\s*(\d{1,3})\s*%',
+        r'"cloudCover"\s*:\s*(\d{1,3})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, payload, flags=re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            value = float(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if 0.0 <= value <= 100.0:
+            return value, base_url
+
+    raise ValueError("Cloud cover not found in Weather Channel payload")
+
+
+def _resolve_cptec_xml_city_id(city_name, uf):
+    """Resolve CPTEC XML city id from city name + UF via listaCidades."""
+    if not city_name:
+        return None
+
+    query = urlparse.urlencode({'city': city_name})
+    list_url = f"https://servicos.cptec.inpe.br/XML/listaCidades?{query}"
+    root = _fetch_xml(list_url)
+
+    uf_norm = (uf or '').strip().upper()
+    for cidade in root.findall('cidade'):
+        nome = (cidade.findtext('nome') or '').strip().lower()
+        uf_node = (cidade.findtext('uf') or '').strip().upper()
+        city_id = (cidade.findtext('id') or '').strip()
+        if nome == city_name.strip().lower() and (not uf_norm or uf_node == uf_norm):
+            if city_id.isdigit():
+                return int(city_id)
+
+    first = root.find('cidade')
+    if first is not None:
+        city_id = (first.findtext('id') or '').strip()
+        if city_id.isdigit():
+            return int(city_id)
+    return None
+
+
+def _estimate_cloud_cover_pct(tempo_code, humidity_pct, rain_risk_pct):
+    """Estimate cloud cover from CPTEC sky code plus humidity/rain signals."""
+    code_map = {
+        # Typical CPTEC weather codes (clear to overcast/storm).
+        'ec': 5, 'ci': 18, 'c': 28, 'in': 45, 'pp': 56,
+        'cm': 68, 'n': 78, 'pn': 88, 'cn': 95, 'pt': 72,
+        'pm': 72, 'np': 92, 'pc': 60, 'ch': 82, 't': 88,
+        'ps': 76, 'e': 52,
+    }
+    base = code_map.get((tempo_code or '').lower())
+    humidity = 0.0 if pd.isna(humidity_pct) else float(humidity_pct)
+    rain_risk = 0.0 if pd.isna(rain_risk_pct) else float(rain_risk_pct)
+
+    if base is None:
+        estimate = max(rain_risk * 0.80, humidity * 0.65)
+    else:
+        estimate = (0.70 * base) + (0.20 * rain_risk) + (0.10 * humidity)
+    return max(0.0, min(100.0, estimate))
+
+
+def _classify_transparency(cloud_cover_pct, rain_risk_pct, humidity_pct):
+    """Return transparency label/score from T=(1-C)*exp(-aR)*exp(-bH)."""
+    a = 0.04
+    b = 1.0
+    cloud_cover = 0.0 if pd.isna(cloud_cover_pct) else float(cloud_cover_pct)
+    rain_risk = 0.0 if pd.isna(rain_risk_pct) else float(rain_risk_pct)
+    humidity = 0.0 if pd.isna(humidity_pct) else float(humidity_pct)
+
+    # C and H are percentages converted to [0, 1]. R uses rain-risk percentage.
+    c = max(0.0, min(1.0, cloud_cover / 100.0))
+    h = max(0.0, min(1.0, humidity / 100.0))
+    r = max(0.0, min(100.0, rain_risk))
+
+    t_value = (1.0 - c) * np.exp(-a * r) * np.exp(-b * h)
+    score = max(0.0, min(100.0, t_value * 100.0))
+    if score >= 75:
+        return 'Alta', score
+    if score >= 45:
+        return 'Média', score
+    return 'Baixa', score
+
+
+def _fetch_inpe_forecast_summary():
+    """Fetch near-term forecast summary from CPTEC/INPE endpoints."""
+    latitude = config['LATITUDE']
+    longitude = config['LONGITUDE']
+
+    base_query = urlparse.urlencode({'latitude': latitude, 'longitude': longitude})
+    api_url = f"https://www.cptec.inpe.br/api/default-geo-forecast?{base_query}"
+    base_data = _fetch_json(api_url)
+
+    city_name = base_data.get('cidade', '')
+    uf = base_data.get('uf', '')
+    city_id = _resolve_cptec_xml_city_id(city_name, uf)
+    tempo_code = None
+    sky_code_url = None
+    if city_id is not None:
+        sky_code_url = f"https://servicos.cptec.inpe.br/XML/cidade/7dias/{int(city_id)}/previsao.xml"
+        xml_root = _fetch_xml(sky_code_url)
+        previsao_node = xml_root.find('previsao')
+        if previsao_node is not None:
+            tempo_node = previsao_node.find('tempo')
+            if tempo_node is not None and tempo_node.text:
+                tempo_code = tempo_node.text.strip().lower()
+
+    rain_risk = _safe_float(base_data.get('probabilidade_chuva'))
+    humidity = _safe_float(base_data.get('umidade'))
+    wind_speed = _safe_float(base_data.get('vento'))
+    weather_channel_url = None
+    cloud_cover_source = 'Weather Channel'
+    try:
+        cloud_cover, weather_channel_url = _fetch_weather_channel_cloud_cover_pct(latitude, longitude)
+    except Exception:
+        cloud_cover = _estimate_cloud_cover_pct(tempo_code, humidity, rain_risk)
+        cloud_cover_source = 'Estimativa INPE (tempo+umidade+chuva)'
+    transparency_label, transparency_score = _classify_transparency(cloud_cover, rain_risk, humidity)
+
+    return {
+        'cidade': city_name or 'N/D',
+        'uf': uf or 'N/D',
+        'hora_atual': base_data.get('hora_atual', 'N/D'),
+        'cloud_cover_pct': cloud_cover,
+        'wind_speed_ms': wind_speed,
+        'rain_risk_pct': rain_risk,
+        'cloud_cover_source': cloud_cover_source,
+        'transparency_label': transparency_label,
+        'transparency_score': transparency_score,
+        'tempo_code': tempo_code or 'N/D',
+        'verify_api_url': api_url,
+        'verify_sky_url': sky_code_url,
+        'verify_weather_channel_url': weather_channel_url,
+        'verify_portal_url': 'https://www.cptec.inpe.br/',
+    }
+
+
+def _get_cached_inpe_forecast_summary():
+    """Return cached INPE forecast summary and refresh periodically."""
+    global inpe_forecast_cache, inpe_forecast_last_fetch
+    now = datetime.datetime.now()
+    cache_seconds = max(10, int(INPE_FETCH_MIN_INTERVAL_SECONDS))
+
+    if (
+        inpe_forecast_cache is not None
+        and inpe_forecast_last_fetch is not None
+        and (now - inpe_forecast_last_fetch).total_seconds() < cache_seconds
+    ):
+        return inpe_forecast_cache
+
+    try:
+        inpe_forecast_cache = _fetch_inpe_forecast_summary()
+        inpe_forecast_last_fetch = now
+    except Exception:
+        if inpe_forecast_cache is None:
+            inpe_forecast_cache = {
+                'cidade': 'N/D',
+                'uf': 'N/D',
+                'hora_atual': 'N/D',
+                'cloud_cover_pct': float('nan'),
+                'wind_speed_ms': float('nan'),
+                'rain_risk_pct': float('nan'),
+                'cloud_cover_source': 'N/D',
+                'transparency_label': 'N/D',
+                'transparency_score': float('nan'),
+                'tempo_code': 'N/D',
+                'verify_api_url': None,
+                'verify_sky_url': None,
+                'verify_weather_channel_url': None,
+                'verify_portal_url': 'https://www.cptec.inpe.br/',
+            }
+            inpe_forecast_last_fetch = now
+    return inpe_forecast_cache
+
+
+def _build_inpe_forecast_card(summary):
+    """Create UI component with CPTEC/INPE forecast indicators."""
+    refreshed_at = datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+
+    cloud_card_body = html.Div([
+        html.Span('Cobertura de nuvens', className='inpe-forecast-label'),
+        html.Span(_format_metric(summary.get('cloud_cover_pct'), '.0f', '%'), className='inpe-forecast-value'),
+        html.Span(summary.get('cloud_cover_source', 'N/D'), className='inpe-forecast-subvalue'),
+    ], className='inpe-forecast-item')
+
+    rain_card_body = html.Div([
+        html.Span('Risco de chuva', className='inpe-forecast-label'),
+        html.Span(_format_metric(summary.get('rain_risk_pct'), '.0f', '%'), className='inpe-forecast-value'),
+        html.Span('Fonte: CPTEC/INPE', className='inpe-forecast-subvalue'),
+    ], className='inpe-forecast-item')
+
+    cloud_card = cloud_card_body
+    if summary.get('verify_weather_channel_url'):
+        cloud_card = html.A(
+            cloud_card_body,
+            href=summary.get('verify_weather_channel_url'),
+            target='_blank',
+            rel='noopener noreferrer',
+            className='inpe-forecast-item-link',
+            title='Abrir cobertura de nuvens no Weather Channel',
+        )
+
+    rain_card = rain_card_body
+    if summary.get('verify_portal_url'):
+        rain_card = html.A(
+            rain_card_body,
+            href=summary.get('verify_portal_url'),
+            target='_blank',
+            rel='noopener noreferrer',
+            className='inpe-forecast-item-link',
+            title='Abrir portal CPTEC/INPE',
+        )
+
+    return html.Div([
+        html.Div([
+            html.Div([
+                html.H4('Previsão CPTEC/INPE', className='inpe-forecast-title'),
+                html.P(
+                    f"{summary.get('cidade', 'N/D')}/{summary.get('uf', 'N/D')}",
+                    className='inpe-forecast-location'
+                ),
+            ], className='inpe-forecast-head-main'),
+            html.Div([
+                html.Span('Atualizado', className='inpe-forecast-updated-label'),
+                html.Span(refreshed_at, className='inpe-forecast-updated-value'),
+            ], className='inpe-forecast-updated-box'),
+        ], className='inpe-forecast-head'),
+        html.Div([
+            cloud_card,
+            rain_card,
+        ], className='inpe-forecast-grid'),
+    ], className='inpe-forecast-card')
 
 
 def _is_daytime_now():
@@ -578,7 +1036,7 @@ def update_dashboard(minutes, n_intervals):
             - info_box (html.Div): Current conditions and location info panel
             - temp_fig (go.Figure): Temperature timeseries plot
             - hum_fig (go.Figure): Humidity timeseries plot
-            - dew_fig (go.Figure): Dew point timeseries plot
+            - rain_fig (go.Figure): Rain accumulation (hour) timeseries plot
             - pressure_fig (go.Figure): Pressure timeseries plot
             - wind_fig (go.Figure): Wind speed timeseries plot
             - dir_fig (go.Figure): Wind direction timeseries plot
@@ -592,10 +1050,20 @@ def update_dashboard(minutes, n_intervals):
     """
     global weather_data, live_wind_data, db, last_db_save, last_db_point_time
     global station_future, latest_station_row, latest_station_status
-    global latest_station_online, last_station_poll
+    global latest_station_online, latest_station_error, last_station_poll
+    global station_future_started_at, station_fail_streak, station_backoff_seconds
+    global dashboard_busy_until, dashboard_last_started_at, dashboard_last_completed_at
+    global dashboard_last_error_at, dashboard_last_error, dashboard_cached_outputs
+    global dashboard_last_duration_seconds, dashboard_duration_samples
+    global range_cache_minutes, range_cache_records, range_cache_loaded_at
+    global last_selected_minutes
     
     # Current timestamp
     now = datetime.datetime.now()
+
+    # Resolve which input triggered before applying busy-guard short-circuit.
+    # This prevents dropping explicit time-range changes when an interval tick
+    # is already being processed.
     triggered_id = None
     if hasattr(dash, 'ctx'):
         triggered_id = dash.ctx.triggered_id
@@ -606,15 +1074,39 @@ def update_dashboard(minutes, n_intervals):
             triggered_id = callback_ctx.triggered[0]['prop_id'].split('.')[0]
     is_time_range_change = triggered_id == 'time-range-dropdown'
 
+    # Guard against transient invalid values during reconnects/front-end refresh.
+    try:
+        selected_minutes = int(minutes)
+        if selected_minutes <= 0:
+            raise ValueError("non-positive time range")
+        last_selected_minutes = selected_minutes
+    except Exception:
+        selected_minutes = int(last_selected_minutes)
+
+    # If a previous callback run is still in progress, serve last completed payload.
+    # Never short-circuit explicit time-range changes.
+    if (
+        dashboard_busy_until is not None
+        and now < dashboard_busy_until
+        and dashboard_cached_outputs is not None
+        and (not is_time_range_change)
+    ):
+        return dashboard_cached_outputs
+
+    dashboard_last_started_at = now
+    callback_started_perf = time.perf_counter()
+    dashboard_busy_until = now + datetime.timedelta(seconds=max(2.0, DASHBOARD_BUSY_GUARD_SECONDS))
+
     # Resolve station config path relative to the package when not absolute.
     station_config = config.get('WEATHER_STATION_CONFIG', 'sigma.yaml')
     if not os.path.isabs(station_config):
         station_config = os.path.join(os.path.dirname(__file__), station_config)
 
     # Keep acquisition always active, throttled by WEATHER_FETCH_INTERVAL_SECONDS.
+    station_poll_interval = max(WEATHER_FETCH_INTERVAL_SECONDS, station_backoff_seconds)
     if station_future is None and (
         last_station_poll is None
-        or (now - last_station_poll).total_seconds() >= WEATHER_FETCH_INTERVAL_SECONDS
+        or (now - last_station_poll).total_seconds() >= station_poll_interval
     ):
         _start_station_fetch(station_config)
 
@@ -624,20 +1116,51 @@ def update_dashboard(minutes, n_intervals):
             latest_station_row = fetched_row
             latest_station_online = bool(fetched_row.get('station_online', True))
             latest_station_status = "Conectado" if latest_station_online else "Desconectado"
-        except Exception:
+            latest_station_error = None
+            station_fail_streak = 0
+            station_backoff_seconds = WEATHER_FETCH_INTERVAL_SECONDS
+        except Exception as e:
             latest_station_row = None
             latest_station_status = "Desconectado"
             latest_station_online = False
+            latest_station_error = str(e)
+            station_fail_streak += 1
+            station_backoff_seconds = min(
+                STATION_MAX_BACKOFF_SECONDS,
+                WEATHER_FETCH_INTERVAL_SECONDS * (2 ** min(station_fail_streak, 6)),
+            )
         finally:
             station_future = None
+            station_future_started_at = None
+
+    # Recover when a station poll blocks for too long.
+    if (
+        station_future is not None
+        and station_future_started_at is not None
+        and (now - station_future_started_at).total_seconds() > STATION_FUTURE_TIMEOUT_SECONDS
+    ):
+        latest_station_row = None
+        latest_station_online = False
+        latest_station_status = "Desconectado"
+        latest_station_error = (
+            f"Leitura da estacao excedeu {STATION_FUTURE_TIMEOUT_SECONDS:.1f}s; reiniciando polling"
+        )
+        station_fail_streak += 1
+        station_backoff_seconds = min(
+            STATION_MAX_BACKOFF_SECONDS,
+            WEATHER_FETCH_INTERVAL_SECONDS * (2 ** min(station_fail_streak, 6)),
+        )
+        _reset_station_executor()
 
     if latest_station_row is not None:
         new_row = dict(latest_station_row)
         new_row['date'] = now
         loop_status = "Conectado" if latest_station_online else "Desconectado"
+        loop_hint = None
         loop_color = "#5eb9d2" if latest_station_online else "#d95252"
     else:
         loop_status = "Desconectado"
+        loop_hint = latest_station_error
         loop_color = "#d95252"
         new_row = _build_offline_row(now)
 
@@ -670,13 +1193,51 @@ def update_dashboard(minutes, n_intervals):
         except Exception as e:
             print(f"Warning: Failed to save to database: {e}")
 
-    # Build plot dataset from persisted DB points for time-scale consistency.
-    db_range = db.get_readings_since(minutes=minutes, max_rows=DROPDOWN_QUERY_MAX_ROWS)
-    if not db_range.empty:
-        filtered = db_range.to_dict('records')
+    # Keep callback responsive while preserving long selected windows.
+    # For windows larger than in-memory retention, maintain a throttled DB cache.
+    memory_window_minutes = int(MEMORY_RETENTION_DAYS * 24 * 60)
+    # Startup preload may hold less history than retention (e.g. 24h preload,
+    # 7d retention). Use DB-backed cache for ranges above preload to avoid
+    # falling back to a shorter in-memory window after dropdown changes.
+    db_backed_window_threshold_minutes = max(1, int(STARTUP_LOAD_MINUTES))
+    filtered = []
+
+    if selected_minutes > db_backed_window_threshold_minutes:
+        should_reload_range_cache = (
+            range_cache_minutes != selected_minutes
+            or range_cache_loaded_at is None
+            or (now - range_cache_loaded_at).total_seconds() >= max(5, LONG_RANGE_CACHE_REFRESH_SECONDS)
+        )
+        if should_reload_range_cache:
+            db_range = db.get_readings_since(minutes=selected_minutes, max_rows=DROPDOWN_QUERY_MAX_ROWS)
+            range_cache_records = db_range.to_dict('records') if not db_range.empty else []
+            range_cache_minutes = selected_minutes
+            range_cache_loaded_at = now
+
+        filtered = list(range_cache_records)
+
+        # Keep latest station point visible even before the next DB persistence cycle.
+        if new_row is not None:
+            if not filtered:
+                filtered = [new_row]
+            else:
+                try:
+                    latest_filtered_ts = pd.to_datetime(filtered[-1].get('date'))
+                    new_row_ts = pd.to_datetime(new_row.get('date'))
+                    if pd.notna(new_row_ts) and new_row_ts > latest_filtered_ts:
+                        filtered.append(new_row)
+                except Exception:
+                    pass
     else:
-        cutoff = now - datetime.timedelta(minutes=minutes)
-        filtered = [row for row in weather_data if row['date'] >= cutoff]
+        # Query DB only on explicit time-range changes or when in-memory cache is empty.
+        if is_time_range_change or not weather_data:
+            db_range = db.get_readings_since(minutes=selected_minutes, max_rows=DROPDOWN_QUERY_MAX_ROWS)
+            if not db_range.empty:
+                filtered = db_range.to_dict('records')
+
+        if not filtered:
+            cutoff = now - datetime.timedelta(minutes=selected_minutes)
+            filtered = [row for row in weather_data if row['date'] >= cutoff]
 
     # Fallback: use latest available data if no data in range
     if not filtered and weather_data:
@@ -723,12 +1284,16 @@ def update_dashboard(minutes, n_intervals):
         dew = row.get('dew_point', np.nan)
         return (not pd.isna(wind)) and (not pd.isna(temp)) and (not pd.isna(dew))
 
-    # Prefer persisted DB points for observation-condition calculations.
-    db_last_30 = db.get_readings_since(minutes=30, max_rows=5000)
-    if not db_last_30.empty:
-        last_30min = db_last_30.to_dict('records')
+    # Prefer in-memory points for responsive 2s updates; DB is fallback only.
+    recent_memory = [row for row in weather_data if row['date'] >= cutoff_30min]
+    if recent_memory:
+        last_30min = list(recent_memory)
     else:
-        last_30min = [row for row in live_wind_data if row['date'] >= cutoff_30min]
+        db_last_30 = db.get_readings_since(minutes=30, max_rows=5000)
+        if not db_last_30.empty:
+            last_30min = db_last_30.to_dict('records')
+        else:
+            last_30min = [row for row in live_wind_data if row['date'] >= cutoff_30min]
 
     # Keep 2s responsiveness by appending current reading if it is newer than DB window.
     if new_row.get('date') is not None and new_row['date'] >= cutoff_30min:
@@ -774,7 +1339,8 @@ def update_dashboard(minutes, n_intervals):
                 obs_color = '#2ecc71'  # Green
                 obs_status = 'Boas'
             # Yellow: acceptable wind and dew point below minimum temperature.
-            elif (wind_speed_max < 15 and 
+            elif (wind_speed_max >= 12 and
+                wind_speed_max < 15 and 
                   wind_speed_avg < 12 and
                   dew_point_max < temp_min):
                 obs_color = '#f1c40f'  # Yellow
@@ -787,7 +1353,7 @@ def update_dashboard(minutes, n_intervals):
     # Wind rose data is rebuilt every callback tick (2s) from the full
     # 30-minute DB window plus the live 2-second buffer overlay. This keeps
     # random sampling/top-5/latest responsive without losing recent history.
-    rose_rows_db = db_last_30.to_dict('records') if not db_last_30.empty else []
+    rose_rows_db = list(recent_memory)
     rose_rows_live = [row for row in live_wind_data if row['date'] >= cutoff_30min]
     rose_rows_by_ts = {}
 
@@ -1113,14 +1679,14 @@ def update_dashboard(minutes, n_intervals):
                     tickmode='array',
                     tickvals=[0, 45, 90, 135, 180, 225, 270, 315],
                     ticktext=['N', 'NE', 'L', 'SE', 'S', 'SO', 'O', 'NO'],
-                    color='var(--color-location)'
+                    color='#e0e0e0'
                 ),
                 radialaxis=dict(
                     range=[0, 1],
                     showticklabels=False,
                     ticks='',
                     showline=False,
-                    color='var(--color-location)'
+                    color='#e0e0e0'
                 )
             ),
             showlegend=False,
@@ -1174,17 +1740,18 @@ def update_dashboard(minutes, n_intervals):
             'plot_bgcolor': 'rgba(0,0,0,0)'
         }
     )
-    dew_fig = go.Figure(
+    rain_fig = go.Figure(
         data=[go.Scatter(x=df['date'], 
-                         y=df['dew_point'], 
+                         y=df['rain_hour'], 
                          mode='lines', 
-                         name='Ponto de Orvalho',
-                         line={'color': '#aa96e3'})],
+                         name='Chuva (hora)',
+                         line={'color': '#4cc9f0'})],
         layout={
             'template': 'plotly_dark',
-            'title': 'Ponto de Orvalho (°C)',
+            'title': 'Chuva por Hora (mm/h)',
+            'uirevision': f'rain-{int(minutes)}',
             'xaxis': {'title': 'Hora'},
-            'yaxis': {'title': '°C'},
+            'yaxis': {'title': 'mm/h'},
             'paper_bgcolor': 'rgba(0,0,0,0)',
             'plot_bgcolor': 'rgba(0,0,0,0)'
         }
@@ -1198,6 +1765,7 @@ def update_dashboard(minutes, n_intervals):
         layout={
             'template': 'plotly_dark',
             'title': 'Umidade (%)',
+            'uirevision': f'humidity-{int(minutes)}',
             'xaxis': {'title': 'Hora'},
             'yaxis': {'title': '%'},
             'paper_bgcolor': 'rgba(0,0,0,0)',
@@ -1212,6 +1780,7 @@ def update_dashboard(minutes, n_intervals):
         layout={
             'template': 'plotly_dark',
             'title': 'Pressão Atmosférica (hPa)',
+            'uirevision': f'pressure-{int(minutes)}',
             'xaxis': {'title': 'Hora'},
             'yaxis': {'title': 'hPa'},
             'paper_bgcolor': 'rgba(0,0,0,0)',
@@ -1249,10 +1818,7 @@ def update_dashboard(minutes, n_intervals):
             # Preserve legend visibility toggles across interval refreshes.
             # Reset only when the selected time range changes.
             'uirevision': f'wind-speed-{int(minutes)}',
-            'xaxis': {
-                'title': 'Hora',
-                'range': [now - datetime.timedelta(minutes=int(minutes)), now]
-            },
+            'xaxis': {'title': 'Hora'},
             # Keep a top band free so the legend does not overlap plotted lines.
             'yaxis': {'title': 'm/s', 'domain': [0.0, 0.86]},
             'showlegend': True,
@@ -1285,10 +1851,8 @@ def update_dashboard(minutes, n_intervals):
         layout={
             'template': 'plotly_dark',
             'title': 'Direção do Vento (°)',
-            'xaxis': {
-                'title': 'Hora',
-                'range': [now - datetime.timedelta(minutes=int(minutes)), now]
-            },
+            'uirevision': f'wind-dir-{int(minutes)}',
+            'xaxis': {'title': 'Hora'},
             'yaxis': {
                 'title': 'Direção (°)',
                 'range': [0, 360],
@@ -1319,24 +1883,38 @@ def update_dashboard(minutes, n_intervals):
     else:
         plot_update_text = "Ultima atualizacao: N/D"
 
-    return (
+    outputs = (
         info_box,
         astro_info_box,
         temp_fig,
         hum_fig,
-        dew_fig,
+        rain_fig,
         pressure_fig,
         wind_fig,
         dir_fig,
         wind_rose_fig,
         plot_update_text,
-        html.Span(f"Estação Meteorológica: {loop_status}", className='status-indicator', style={'color': loop_color}),
+        html.Span(
+            f"Estação Meteorológica: {loop_status}",
+            title=loop_hint,
+            className='status-indicator',
+            style={'color': loop_color}
+        ),
         html.Span(
             f"Câmera de todo céu: {'Conectado' if camera_connected else 'Desconectado'}",
             className='status-indicator',
             style={'color': '#5eb9d2' if camera_connected else '#d95252'}
         )
     )
+
+    dashboard_cached_outputs = outputs
+    dashboard_last_completed_at = datetime.datetime.now()
+    dashboard_last_duration_seconds = max(0.0, time.perf_counter() - callback_started_perf)
+    dashboard_duration_samples.append(dashboard_last_duration_seconds)
+    dashboard_last_error = None
+    dashboard_last_error_at = None
+    dashboard_busy_until = None
+    return outputs
 
 
 @app.callback(
@@ -1349,22 +1927,78 @@ def update_dashboard(minutes, n_intervals):
     ]
 )
 def update_allsky_image(_n_intervals):
-    """Update all-sky image independently and report image refresh time."""
-    all_sky_url = read_allsky(config['ALLSKY_CAMERA_CONFIG'])
-    if _is_daytime_now():
-        return all_sky_url, html.Span("Última atualização: pausa diurna")
+    """Update all-sky image without blocking callback execution."""
+    global allsky_future, latest_allsky_url, latest_allsky_updated_at
+    global allsky_future_started_at, latest_allsky_error, last_allsky_poll
+    global allsky_fail_streak, allsky_backoff_seconds
 
-    image_update = datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')
-    return all_sky_url, html.Span(f"Última atualização: {image_update}")
+    now = datetime.datetime.now()
+
+    allsky_config = config.get('ALLSKY_CAMERA_CONFIG', 'oculus.yaml')
+    if not os.path.isabs(allsky_config):
+        allsky_config = os.path.join(os.path.dirname(__file__), allsky_config)
+
+    allsky_interval = max(ALLSKY_MIN_FETCH_INTERVAL_SECONDS, allsky_backoff_seconds)
+    if allsky_future is None and (
+        last_allsky_poll is None
+        or (now - last_allsky_poll).total_seconds() >= allsky_interval
+    ):
+        _start_allsky_fetch(allsky_config)
+
+    if allsky_future is not None and allsky_future.done():
+        try:
+            allsky_url = allsky_future.result()
+            latest_allsky_url = allsky_url or latest_allsky_url or DEFAULT_BLACK_FRAME_URL
+            latest_allsky_updated_at = now
+            latest_allsky_error = None
+            allsky_fail_streak = 0
+            allsky_backoff_seconds = ALLSKY_MIN_FETCH_INTERVAL_SECONDS
+        except Exception as e:
+            latest_allsky_error = str(e)
+            allsky_fail_streak += 1
+            allsky_backoff_seconds = min(
+                ALLSKY_MAX_BACKOFF_SECONDS,
+                ALLSKY_MIN_FETCH_INTERVAL_SECONDS * (2 ** min(allsky_fail_streak, 6)),
+            )
+        finally:
+            allsky_future = None
+            allsky_future_started_at = None
+
+    if (
+        allsky_future is not None
+        and allsky_future_started_at is not None
+        and (now - allsky_future_started_at).total_seconds() > ALLSKY_FETCH_TIMEOUT_SECONDS
+    ):
+        latest_allsky_error = (
+            f"Leitura da camera excedeu {ALLSKY_FETCH_TIMEOUT_SECONDS:.1f}s; reiniciando captura"
+        )
+        allsky_fail_streak += 1
+        allsky_backoff_seconds = min(
+            ALLSKY_MAX_BACKOFF_SECONDS,
+            ALLSKY_MIN_FETCH_INTERVAL_SECONDS * (2 ** min(allsky_fail_streak, 6)),
+        )
+        _reset_allsky_executor()
+
+    if latest_allsky_updated_at is not None:
+        return (
+            latest_allsky_url or DEFAULT_BLACK_FRAME_URL,
+            html.Span(f"Última atualização: {latest_allsky_updated_at.strftime('%d/%m/%Y %H:%M:%S')}")
+        )
+
+    return latest_allsky_url or DEFAULT_BLACK_FRAME_URL, html.Span("Última atualização: N/D")
 
 
 @app.callback(
-    [Output('inpe-iframe', 'src')],
+    [
+        Output('inpe-iframe', 'src'),
+        Output('inpe-forecast-box', 'children'),
+    ],
     [Input('inpe-interval', 'n_intervals')]
 )
 def update_inpe_iframe(_n_intervals):
-    """Refresh INPE iframe URL so the date query parameter stays updated."""
-    return [_build_inpe_url()]
+    """Refresh INPE resources (satellite iframe and forecast card)."""
+    inpe_summary = _get_cached_inpe_forecast_summary()
+    return [_build_inpe_url(), _build_inpe_forecast_card(inpe_summary)]
 
 
 @app.callback(
@@ -1384,12 +2018,17 @@ if __name__ == '__main__':
     # Application entry point when run directly
     # Bind to all network interfaces to make accessible from other computers
     # Access from other devices at: http://192.168.1.88:<port>
-    debug_mode = bool(config.get('DASH_DEBUG', False))
+    env_debug = os.getenv('DASH_DEBUG')
+    if env_debug is None:
+        debug_mode = bool(config.get('DASH_DEBUG', False))
+    else:
+        debug_mode = env_debug.strip().lower() in ('1', 'true', 'yes', 'on')
     app.run(
         debug=debug_mode,
         host=config['SERVER_HOST'],
         port=config['SERVER_PORT'],
-        use_reloader=debug_mode,
-        dev_tools_hot_reload=debug_mode,
+        use_reloader=False,
+        dev_tools_hot_reload=False,
+        threaded=True,
     )
 

@@ -509,6 +509,25 @@ def _process_image(img_array, config):
                 pil_img = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
             elif target_w and target_h:
                 pil_img = pil_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+        # Trim image borders on left/right before showing on dashboard.
+        # Default: remove 30 px from each side.
+        crop_horizontal_margin_px = int(proc_config.get('crop_horizontal_margin_px', 30))
+        if crop_horizontal_margin_px > 0:
+            img_w, img_h = pil_img.size
+            if img_w > (2 * crop_horizontal_margin_px):
+                pil_img = pil_img.crop((
+                    crop_horizontal_margin_px,
+                    0,
+                    img_w - crop_horizontal_margin_px,
+                    img_h,
+                ))
+            else:
+                logger.warning(
+                    "Skipping horizontal crop: width=%s is too small for margin=%s",
+                    img_w,
+                    crop_horizontal_margin_px,
+                )
         
         # Add watermark
         if proc_config.get('watermark', True):

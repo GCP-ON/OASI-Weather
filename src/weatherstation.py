@@ -86,10 +86,20 @@ def _read_register_value(client, register_address, data_type="float32", unit_id=
     else:
         count = 1
 
+    def _read_with_compat(reader):
+        """Call pymodbus read method across API variants."""
+        try:
+            return reader(address=address, count=count, device_id=unit_id)
+        except TypeError:
+            try:
+                return reader(address=address, count=count, slave=unit_id)
+            except TypeError:
+                return reader(address=address, count=count, unit=unit_id)
+
     if function_code == 3:
-        response = client.read_holding_registers(address=address, count=count, device_id=unit_id)
+        response = _read_with_compat(client.read_holding_registers)
     elif function_code == 4:
-        response = client.read_input_registers(address=address, count=count, device_id=unit_id)
+        response = _read_with_compat(client.read_input_registers)
     else:
         raise ValueError(f"Unsupported function_code: {function_code}")
 

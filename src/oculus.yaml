@@ -45,14 +45,14 @@ camera:
   
 # Night-only operation
 schedule:
-  capture_after_sunset_offset: 0  # minutes after sunset to start (negative = before sunset)
+  capture_after_sunset_offset: -30  # minutes after sunset to start (negative = before sunset)
   capture_before_sunrise_offset: 0  # minutes before sunrise to stop
   daytime_placeholder: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'%3E%3Crect width='1' height='1' fill='%23000000'/%3E%3C/svg%3E"  # Black frame for daytime
 
 # Image storage
 storage:
   save_path: "data/allsky"  # Relative to src/ directory
-  filename_pattern: "allsky_{timestamp}.jpg"  # {timestamp} = YYYYMMDD_HHMMSS
+  filename_pattern: "allsky.jpg"  # {timestamp} = YYYYMMDD_HHMMSS
   keep_latest_only: true  # If true, only keeps most recent image
   archive_images: false  # If true, keeps all images
   archive_path: "data/allsky_archive"
@@ -63,6 +63,7 @@ processing:
   auto_stretch: true  # Enhance contrast
   denoise: false
   preserve_aspect_ratio: true  # Keep original proportions when resizing
+  crop_horizontal_margin_px: 200  # Trim 70 px from left and right sides
   resize_width: 1920  # Set one dimension or both; aspect is preserved
   resize_height: null
   watermark: true

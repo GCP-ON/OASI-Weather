@@ -307,12 +307,175 @@ body {
     margin-bottom: 0;
 }
 
-.weatherbug-iframe {
+.inpe-forecast-wrapper {
     width: 100%;
     height: 100%;
-    border: none;
-    background-color: #202529;
-    margin-top: 0;
+    display: flex;
+}
+
+.inpe-forecast-card {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+    border-radius: 10px;
+    border: 1px solid rgba(143, 181, 209, 0.24);
+    background:
+        radial-gradient(circle at 86% -18%, rgba(124, 192, 238, 0.18), transparent 42%),
+        linear-gradient(160deg, #152027 0%, #1e2f3a 55%, #233946 100%);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+    color: #eef5fb;
+}
+
+.inpe-forecast-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.inpe-forecast-head-main {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.inpe-forecast-title {
+    margin: 0;
+    font-size: 1.06em;
+    letter-spacing: 0.25px;
+    color: #f3f8fd;
+}
+
+.inpe-forecast-location {
+    margin: 0;
+    color: #b8c8d6;
+    font-size: 0.84em;
+    letter-spacing: 0.2px;
+}
+
+.inpe-forecast-updated-box {
+    min-width: 146px;
+    border: 1px solid rgba(140, 172, 196, 0.25);
+    border-radius: 8px;
+    background-color: rgba(9, 18, 24, 0.34);
+    padding: 6px 9px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+}
+
+.inpe-forecast-updated-label {
+    color: #93a9bc;
+    font-size: 0.72em;
+    text-transform: uppercase;
+    letter-spacing: 0.45px;
+}
+
+.inpe-forecast-updated-value {
+    color: #e3edf6;
+    font-size: 0.8em;
+    font-weight: 600;
+}
+
+.inpe-forecast-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.inpe-current-grid {
+    margin-bottom: 2px;
+}
+
+.inpe-horizons-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.inpe-horizon-card {
+    background-color: rgba(14, 24, 31, 0.35);
+    border: 1px solid rgba(145, 170, 191, 0.18);
+    border-radius: 6px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.inpe-horizon-title {
+    margin: 0;
+    font-size: 0.9em;
+    color: #dbe8f2;
+    text-align: center;
+}
+
+.inpe-forecast-item {
+    background-color: rgba(8, 16, 22, 0.44);
+    border: 1px solid rgba(152, 181, 201, 0.24);
+    border-radius: 8px;
+    padding: 10px 11px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-height: 88px;
+}
+
+.inpe-forecast-item-link {
+    text-decoration: none;
+    color: inherit;
+    display: block;
+    border-radius: 8px;
+    transition: transform 0.15s ease, box-shadow 0.18s ease;
+}
+
+.inpe-forecast-item-link:hover .inpe-forecast-item {
+    border-color: rgba(179, 218, 242, 0.55);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.24);
+    transform: translateY(-1px);
+}
+
+.inpe-forecast-item-wide {
+    grid-column: 1 / 3;
+}
+
+.inpe-forecast-label {
+    font-size: 0.74em;
+    color: #9ab2c6;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.inpe-forecast-value {
+    font-size: 1.12em;
+    font-weight: 700;
+    color: #f3f8fd;
+    line-height: 1.1;
+}
+
+.inpe-forecast-subvalue {
+    margin-top: auto;
+    font-size: 0.76em;
+    color: #8ea7bb;
+}
+
+.inpe-transparency-high {
+    color: #59d889;
+}
+
+.inpe-transparency-medium {
+    color: #f3c967;
+}
+
+.inpe-transparency-low {
+    color: #ef7664;
+}
+
+.inpe-transparency-na {
+    color: #a8b4c0;
 }
 
 .all-sky-container {
@@ -716,3 +879,96 @@ body {
 .color-moon-time { color: var(--color-moon-time); font-weight: bold; }
 .color-loop-active { color: var(--color-loop-active); font-weight: bold; }
 .color-loop-inactive { color: var(--color-loop-inactive); font-weight: bold; }
+
+@media (max-width: 900px) {
+    .header {
+        flex-wrap: wrap;
+        justify-content: center;
+    }
+
+    .header > .header-title {
+        order: 1;
+        flex: 0 0 100%;
+    }
+
+    .logo-img,
+    .logo-on-img {
+        order: 2;
+        height: 42px;
+        padding: 4px;
+    }
+
+    .logo-on-img {
+        order: 3;
+    }
+
+    .main-row {
+        flex-direction: column;
+        flex-wrap: nowrap;
+        min-height: 0;
+    }
+
+    .left-half,
+    .right-half {
+        width: 100%;
+    }
+
+    .left-grid {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto;
+    }
+
+    .astro-card {
+        grid-column: 1;
+    }
+
+    .inpe-forecast-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .inpe-forecast-item-wide {
+        grid-column: 1;
+    }
+
+    .inpe-horizons-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .all-sky-container {
+        min-height: 520px;
+    }
+
+    .plots-row {
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    .plot-col {
+        width: 100%;
+    }
+
+    .time-selector-box {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .time-selector-label {
+        width: 100%;
+        text-align: left;
+    }
+
+    .time-selector-dropdown {
+        min-width: 0;
+        width: 100%;
+        flex: 1 1 auto;
+    }
+
+    .loop-status-box {
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .obs-criteria-grid {
+        grid-template-columns: 1fr;
+    }
+}
