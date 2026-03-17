@@ -5,7 +5,7 @@ description = "Observatory weather and all-sky monitoring dashboard (Dash + Modb
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "dash>=3.2.0",
+    "dash==3.2.0",
     "jupyter>=1.1.1",
     "matplotlib>=3.10.5",
     "numpy>=2.3.2",

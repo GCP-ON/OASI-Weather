@@ -17,7 +17,7 @@ body {
 
 .header-bar {
     width: 100%;
-    background-color: #1b2f46;
+    background-color: #1e1c1b;
 }
 
 .header {
@@ -897,7 +897,7 @@ body {
 
 .footer {
     height: 100px;
-    background-color: #1a1a1a;
+    background-color: #1e1c1b;
     color: #e0e0e0;
     text-align: center;
     display: flex;

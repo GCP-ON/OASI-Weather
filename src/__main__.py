@@ -304,8 +304,8 @@ app.index_string = '''
     <head>
         {%metas%}
         <title>OASI-Weather</title>
-        <link rel="icon" type="image/png" href="favicon.ico?v=20260313">
-        <link rel="shortcut icon" type="image/png" href="favicon.ico?v=20260313">
+        <link rel="icon" type="image/png" href="assets/logo_impacton_round.png?v=20260313">
+        <link rel="shortcut icon" type="image/png" href="assets/logo_impacton_round.png?v=20260313">
         {%css%}
         <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,300&display=swap" rel="stylesheet">
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
@@ -1154,9 +1154,9 @@ def update_dashboard(minutes, n_intervals):
         selected_minutes = int(minutes)
         if selected_minutes <= 0:
             raise ValueError("non-positive time range")
-        last_selected_minutes = selected_minutes
     except Exception:
-        selected_minutes = int(last_selected_minutes)
+        # Only fall back if dropdown value is truly invalid (not int or negative)
+        selected_minutes = 30  # Use default, not last_selected_minutes
 
     # If a previous callback run is still in progress, serve last completed payload.
     # Never short-circuit explicit time-range changes.
@@ -1165,8 +1165,13 @@ def update_dashboard(minutes, n_intervals):
         and now < dashboard_busy_until
         and dashboard_cached_outputs is not None
         and (not is_time_range_change)
+        and triggered_id != 'time-range-dropdown'
     ):
+        # Only return cached outputs for interval ticks, never for dropdown changes.
         return dashboard_cached_outputs
+    # If triggered by time-range-dropdown, always proceed with fresh update (do not return cached outputs).
+    # This ensures dropdown changes are never short-circuited.
+    # No additional code needed here, as the above condition already excludes dropdown changes.
 
     dashboard_last_started_at = now
     callback_started_perf = time.perf_counter()
@@ -1653,7 +1658,7 @@ def update_dashboard(minutes, n_intervals):
                 ),
                 line=dict(color='rgba(177, 203, 224, 0.18)', width=0.4),
             ),
-            opacity=0.66,
+            opacity=0.78,
             name='Amostra aleatória (30 min)',
             hovertemplate='Direção: %{theta:.0f}°<br>Velocidade: %{marker.color:.1f} m/s<extra></extra>',
         )
@@ -1661,27 +1666,8 @@ def update_dashboard(minutes, n_intervals):
 
     if len(top5_dirs) > 0:
         wind_rose_data.append(
-            go.Barpolar(
-                # Rays for top-5 speeds.
-                r=np.ones_like(top5_dirs),
-                theta=top5_dirs,
-                width=np.full_like(top5_dirs, 2.2),
-                marker=dict(
-                    color=top5_speeds,
-                    colorscale=wind_colorscale,
-                    cmin=0,
-                    cmax=15,
-                    showscale=False,
-                    line=dict(color='rgba(224, 236, 247, 0.25)', width=0.8),
-                ),
-                opacity=0.88,
-                hoverinfo='skip',
-                showlegend=False,
-            )
-        )
-        wind_rose_data.append(
             go.Scatterpolar(
-                # Top-5 wind speeds overlay (above base and its own rays).
+                # Top-5 wind speeds overlay markers at ray endpoints.
                 r=np.ones_like(top5_dirs),
                 theta=top5_dirs,
                 mode='markers',
@@ -1697,42 +1683,61 @@ def update_dashboard(minutes, n_intervals):
                 showlegend=False,
             )
         )
-
-    if avg_dir_30min is not None:
         wind_rose_data.append(
-            go.Scatterpolar(
-                # Soft glow base for a modern average-direction indicator.
-                r=[0.0, 1.0],
-                theta=[avg_dir_30min, avg_dir_30min],
-                mode='lines',
-                line=dict(color='rgba(152, 190, 223, 0.24)', width=14),
+            go.Barpolar(
+                # Rays for top-5 speeds (same length as base rays).
+                r=np.ones_like(top5_dirs),
+                theta=top5_dirs,
+                width=np.full_like(top5_dirs, 2.2),
+                marker=dict(
+                    color=top5_speeds,
+                    colorscale=wind_colorscale,
+                    cmin=0,
+                    cmax=15,
+                    showscale=False,
+                    line=dict(color='rgba(224, 236, 247, 0.25)', width=0.8),
+                ),
+                opacity=0.94,
                 hoverinfo='skip',
                 showlegend=False,
             )
         )
+
+    if avg_dir_30min is not None:
         wind_rose_data.append(
             go.Scatterpolar(
-                # Crisp foreground ray with endpoint marker.
+                # Average direction indicator, same length as rays, no endpoint marker.
                 r=[0.0, 1.0],
                 theta=[avg_dir_30min, avg_dir_30min],
-                mode='lines+markers',
+                mode='lines',
                 line=dict(color='#a9c8e4', width=2.5, dash='dot'),
-                marker=dict(
-                    size=[0, 10],
-                    color=['rgba(0,0,0,0)', '#a9c8e4'],
-                    symbol=['circle', 'circle'],
-                    line=dict(color='#102132', width=1.4),
-                ),
-                name='Direção média (30 min)',
-                hovertemplate='Direção média 30 min: %{theta:.0f}°<extra></extra>',
+                hoverinfo='skip',
                 showlegend=False,
             )
         )
 
     if latest_point is not None:
         wind_rose_data.append(
+            go.Scatterpolar(
+                # Latest reading overlay marker at ray endpoint.
+                r=[1.0],
+                theta=[latest_point['dir']],
+                mode='markers',
+                marker=dict(
+                    size=14,
+                    color='#54d6c8',
+                    symbol='circle',
+                    line=dict(color='#315574', width=2.2),
+                ),
+                name='Leitura mais recente',
+                hovertemplate='Mais recente<br>Direção: %{theta:.0f}°<br>Velocidade: %{customdata:.1f} m/s<extra></extra>',
+                customdata=[latest_point['speed']],
+                showlegend=False,
+            )
+        )
+        wind_rose_data.append(
             go.Barpolar(
-                # Ray for latest reading.
+                # Ray for latest reading (same length as others).
                 r=[1.0],
                 theta=[latest_point['dir']],
                 width=[2.5],
@@ -1746,24 +1751,6 @@ def update_dashboard(minutes, n_intervals):
                 ),
                 opacity=0.98,
                 hoverinfo='skip',
-                showlegend=False,
-            )
-        )
-        wind_rose_data.append(
-            go.Scatterpolar(
-                # Latest reading overlay, drawn last to stay on top.
-                r=[1.0],
-                theta=[latest_point['dir']],
-                mode='markers',
-                marker=dict(
-                    size=14,
-                    color='#54d6c8',
-                    symbol='circle',
-                    line=dict(color='#315574', width=2.2),
-                ),
-                name='Leitura mais recente',
-                hovertemplate='Mais recente<br>Direção: %{theta:.0f}°<br>Velocidade: %{customdata:.1f} m/s<extra></extra>',
-                customdata=[latest_point['speed']],
                 showlegend=False,
             )
         )
@@ -1964,17 +1951,23 @@ def update_dashboard(minutes, n_intervals):
     df_dir_plot = df[['date', 'wind_dir']].copy()
     df_dir_plot['wind_dir'] = pd.to_numeric(df_dir_plot['wind_dir'], errors='coerce')
 
+    # Synchronize x-axis range with other plots
+    x_range = None
+    if not df.empty:
+        x_range = [df['date'].min(), df['date'].max()]
     dir_fig = go.Figure(
-        data=[go.Scatter(x=df_dir_plot['date'], 
-                         y=df_dir_plot['wind_dir'], 
-                         mode='lines', 
-                         name='Direção do Vento',
-                         line={'color': '#7fd1b9'})],
+        data=[go.Scatter(
+            x=df_dir_plot['date'],
+            y=df_dir_plot['wind_dir'],
+            mode='markers',
+            name='Direção do Vento',
+            marker={'color': '#7fd1b9', 'size': 6}
+        )],
         layout={
             'template': 'plotly_dark',
             'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf14e</span>&nbsp;&nbsp;Direção do Vento (°)",
             'uirevision': f'wind-dir-{int(minutes)}',
-            'xaxis': {'title': 'Hora'},
+            'xaxis': {'title': 'Hora', 'range': x_range, 'tickangle': 0},
             'yaxis': {
                 'title': 'Direção (°)',
                 'range': [0, 360],
@@ -2000,7 +1993,7 @@ def update_dashboard(minutes, n_intervals):
         title=dict(font=dict(size=17, color='#dbe8f5'), pad=dict(b=14)),
     )
     wind_rose_fig.update_polars(
-        bgcolor='rgba(0,0,0,0)',
+        bgcolor='#1e1c1b',
         angularaxis=dict(
             showgrid=True,
             gridcolor='rgba(133, 161, 185, 0.22)',
