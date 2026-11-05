@@ -24,7 +24,7 @@ ascom:
 # Camera Settings
 camera:
   # Exposure settings (only after sunset)
-  exposure_time: 30.0  # seconds
+  exposure_time: 60.0  # seconds
   min_capture_interval_seconds: 90  # Prevent overlapping/too-frequent captures
   capture_timeout_seconds: 180  # Max wait for ImageReady before abort
   gain: null  # null = do not set (driver may not support Gain)

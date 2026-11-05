@@ -256,17 +256,25 @@ def _is_nighttime(config):
         sunset_offset = schedule.get('capture_after_sunset_offset', 0)
         sunrise_offset = schedule.get('capture_before_sunrise_offset', 0)
         
-        # Adjust times with offsets
-        sunset_dt = datetime.datetime.combine(now.date(), sunset_time)
-        sunset_dt += datetime.timedelta(minutes=sunset_offset)
-        
-        sunrise_dt = datetime.datetime.combine(now.date(), sunrise_time)
-        if sunrise_time < sunset_time:  # Sunrise is next day
-            sunrise_dt += datetime.timedelta(days=1)
-        sunrise_dt -= datetime.timedelta(minutes=sunrise_offset)
-        
-        # Check if current time is in night window
-        if now >= sunset_dt and now <= sunrise_dt:
+        # Build two possible overnight windows around "now":
+        # 1) yesterday sunset -> today sunrise (covers post-midnight)
+        # 2) today sunset -> tomorrow sunrise (covers evening/night)
+        today = now.date()
+        sunset_today = datetime.datetime.combine(today, sunset_time)
+        sunset_today += datetime.timedelta(minutes=sunset_offset)
+
+        sunrise_today = datetime.datetime.combine(today, sunrise_time)
+        sunrise_today -= datetime.timedelta(minutes=sunrise_offset)
+
+        previous_night_start = sunset_today - datetime.timedelta(days=1)
+        previous_night_end = sunrise_today
+
+        current_night_start = sunset_today
+        current_night_end = sunrise_today + datetime.timedelta(days=1)
+
+        if previous_night_start <= now <= previous_night_end:
+            return True
+        if current_night_start <= now <= current_night_end:
             return True
         return False
         
