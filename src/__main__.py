@@ -968,8 +968,22 @@ app.layout = html.Div(
                             id='history-calendar-plot',
                             className='history-calendar-graph',
                             config={'responsive': False},
-                            style={'height': '410px', 'minHeight': '410px', 'maxHeight': '410px'}
-                        )
+                            style={'height': '386px', 'minHeight': '386px', 'maxHeight': '386px'}
+                        ),
+                        html.Div([
+                            html.Span([
+                                html.Span('\uf753', className='history-calendar-legend-icon history-calendar-legend-icon-moon'),
+                                ' Janela Observacional'
+                            ], className='history-calendar-legend-item'),
+                            html.Span([
+                                html.Span('\uf73d', className='history-calendar-legend-icon history-calendar-legend-icon-rain'),
+                                ' Choveu'
+                            ], className='history-calendar-legend-item'),
+                            html.Span([
+                                html.Span('\uf72e', className='history-calendar-legend-icon history-calendar-legend-icon-wind'),
+                                ' Velocidade do Vento'
+                            ], className='history-calendar-legend-item'),
+                        ], className='history-calendar-legend-row')
                     ], className='history-card history-calendar-card'),
                 ], className='history-overview-row'),
 
@@ -3008,7 +3022,7 @@ def update_history_page(start_date, end_date, end_enabled, selected_month, selec
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
         margin=dict(l=44, r=20, t=28, b=40),
-        height=410,
+        height=386,
         font=dict(family='DM Sans, Inter, Segoe UI, sans-serif', color='#d8e4f0'),
         annotations=annotations,
         shapes=selected_day_shape,
