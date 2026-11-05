@@ -43,6 +43,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 from pathlib import Path
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +84,35 @@ class WeatherDatabase:
                 it doesn't exist. Defaults to 'weather_data.db' in current dir.
         """
         self.db_path = Path(db_path)
+        self._sqlite_timeout_seconds = 15.0
+        self._busy_timeout_ms = 15000
+        self._retry_attempts = 4
+        self._retry_base_sleep_seconds = 0.06
         self._init_database()
         logger.info(f"Weather database initialized at {self.db_path}")
+
+    @staticmethod
+    def _is_locked_error(exc):
+        """Return True when exception is a transient SQLite lock error."""
+        return isinstance(exc, sqlite3.OperationalError) and 'locked' in str(exc).lower()
+
+    def _run_with_retry(self, operation, operation_name='database operation'):
+        """Run operation with short exponential backoff on lock contention."""
+        for attempt in range(1, self._retry_attempts + 1):
+            try:
+                return operation()
+            except sqlite3.OperationalError as exc:
+                if (not self._is_locked_error(exc)) or attempt >= self._retry_attempts:
+                    raise
+                sleep_seconds = self._retry_base_sleep_seconds * (2 ** (attempt - 1))
+                logger.warning(
+                    "%s hit SQLite lock (attempt %d/%d). Retrying in %.2fs",
+                    operation_name,
+                    attempt,
+                    self._retry_attempts,
+                    sleep_seconds,
+                )
+                time.sleep(sleep_seconds)
     
     @contextmanager
     def _get_connection(self):
@@ -93,8 +121,9 @@ class WeatherDatabase:
         Yields:
             sqlite3.Connection: Database connection with row factory set.
         """
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn = sqlite3.connect(self.db_path, timeout=self._sqlite_timeout_seconds)
         conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms}")
         try:
             yield conn
             conn.commit()
@@ -109,6 +138,10 @@ class WeatherDatabase:
         """Create database tables and indexes if they don't exist."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
+
+            # Improve read/write concurrency for dashboards reading while writer inserts.
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
             
             # Create weather_readings table
             cursor.execute("""
@@ -160,42 +193,43 @@ class WeatherDatabase:
             ... })
         """
         try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                
-                # Convert NaN to None for SQL NULL
-                def clean_value(val):
-                    if val is None or (isinstance(val, float) and np.isnan(val)):
-                        return None
-                    return val
-                
-                cursor.execute("""
-                    INSERT INTO weather_readings (
-                        timestamp, temperature, humidity, dew_point,
-                        wind_speed, wind_dir, pressure, battery_voltage,
-                        source_voltage, rain_min, rain_hour, rain_day,
-                        rain_total, station_status, station_online
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    reading.get('date'),
-                    clean_value(reading.get('temperature')),
-                    clean_value(reading.get('humidity')),
-                    clean_value(reading.get('dew_point')),
-                    clean_value(reading.get('wind_speed')),
-                    clean_value(reading.get('wind_dir')),
-                    clean_value(reading.get('pressure')),
-                    clean_value(reading.get('battery_voltage')),
-                    clean_value(reading.get('source_voltage')),
-                    clean_value(reading.get('rain_min')),
-                    clean_value(reading.get('rain_hour')),
-                    clean_value(reading.get('rain_day')),
-                    clean_value(reading.get('rain_total')),
-                    reading.get('station_status', 'Ativo'),
-                    reading.get('station_online', True)
-                ))
-                
-                return cursor.lastrowid
-                
+            # Convert NaN to None for SQL NULL
+            def clean_value(val):
+                if val is None or (isinstance(val, float) and np.isnan(val)):
+                    return None
+                return val
+
+            def _insert_op():
+                with self._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        INSERT INTO weather_readings (
+                            timestamp, temperature, humidity, dew_point,
+                            wind_speed, wind_dir, pressure, battery_voltage,
+                            source_voltage, rain_min, rain_hour, rain_day,
+                            rain_total, station_status, station_online
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        reading.get('date'),
+                        clean_value(reading.get('temperature')),
+                        clean_value(reading.get('humidity')),
+                        clean_value(reading.get('dew_point')),
+                        clean_value(reading.get('wind_speed')),
+                        clean_value(reading.get('wind_dir')),
+                        clean_value(reading.get('pressure')),
+                        clean_value(reading.get('battery_voltage')),
+                        clean_value(reading.get('source_voltage')),
+                        clean_value(reading.get('rain_min')),
+                        clean_value(reading.get('rain_hour')),
+                        clean_value(reading.get('rain_day')),
+                        clean_value(reading.get('rain_total')),
+                        reading.get('station_status', 'Ativo'),
+                        reading.get('station_online', True)
+                    ))
+                    return cursor.lastrowid
+
+            return self._run_with_retry(_insert_op, operation_name='insert_reading')
+
         except Exception as e:
             logger.error(f"Failed to insert reading: {e}")
             return None
@@ -266,11 +300,29 @@ class WeatherDatabase:
         """
         try:
             cutoff = datetime.now() - timedelta(minutes=minutes)
-            
-            with self._get_connection() as conn:
-                if max_rows is not None and int(max_rows) > 0:
-                    query = """
-                        SELECT * FROM (
+
+            def _query_op():
+                with self._get_connection() as conn:
+                    if max_rows is not None and int(max_rows) > 0:
+                        query = """
+                            SELECT * FROM (
+                                SELECT 
+                                    timestamp as date,
+                                    temperature, humidity, dew_point,
+                                    wind_speed, wind_dir, pressure,
+                                    battery_voltage, source_voltage,
+                                    rain_min, rain_hour, rain_day, rain_total,
+                                    station_status, station_online
+                                FROM weather_readings
+                                WHERE timestamp >= ?
+                                ORDER BY timestamp DESC
+                                LIMIT ?
+                            ) AS recent
+                            ORDER BY recent.date ASC
+                        """
+                        df_local = pd.read_sql_query(query, conn, params=(cutoff, int(max_rows)))
+                    else:
+                        query = """
                             SELECT 
                                 timestamp as date,
                                 temperature, humidity, dew_point,
@@ -280,33 +332,16 @@ class WeatherDatabase:
                                 station_status, station_online
                             FROM weather_readings
                             WHERE timestamp >= ?
-                            ORDER BY timestamp DESC
-                            LIMIT ?
-                        ) AS recent
-                        ORDER BY recent.date ASC
-                    """
-                    df = pd.read_sql_query(query, conn, params=(cutoff, int(max_rows)))
-                else:
-                    query = """
-                        SELECT 
-                            timestamp as date,
-                            temperature, humidity, dew_point,
-                            wind_speed, wind_dir, pressure,
-                            battery_voltage, source_voltage,
-                            rain_min, rain_hour, rain_day, rain_total,
-                            station_status, station_online
-                        FROM weather_readings
-                        WHERE timestamp >= ?
-                        ORDER BY timestamp ASC
-                    """
-                    df = pd.read_sql_query(query, conn, params=(cutoff,))
-                
-                # Convert timestamp column to datetime
-                if not df.empty:
-                    df['date'] = pd.to_datetime(df['date'])
-                
-                return df
-                
+                            ORDER BY timestamp ASC
+                        """
+                        df_local = pd.read_sql_query(query, conn, params=(cutoff,))
+
+                    if not df_local.empty:
+                        df_local['date'] = pd.to_datetime(df_local['date'])
+                    return df_local
+
+            return self._run_with_retry(_query_op, operation_name='get_readings_since')
+
         except Exception as e:
             logger.error(f"Failed to query readings: {e}")
             return pd.DataFrame()
@@ -322,30 +357,33 @@ class WeatherDatabase:
             pandas.DataFrame: Weather readings in the specified range.
         """
         try:
-            with self._get_connection() as conn:
-                query = """
-                    SELECT 
-                        timestamp as date,
-                        temperature, humidity, dew_point,
-                        wind_speed, wind_dir, pressure,
-                        battery_voltage, source_voltage,
-                        rain_min, rain_hour, rain_day, rain_total,
-                        station_status, station_online
-                    FROM weather_readings
-                    WHERE timestamp >= ? AND timestamp <= ?
-                    ORDER BY timestamp ASC
-                """
-                
-                df = pd.read_sql_query(
-                    query, conn, 
-                    params=(start_datetime, end_datetime)
-                )
-                
-                if not df.empty:
-                    df['date'] = pd.to_datetime(df['date'])
-                
-                return df
-                
+            def _query_op():
+                with self._get_connection() as conn:
+                    query = """
+                        SELECT 
+                            timestamp as date,
+                            temperature, humidity, dew_point,
+                            wind_speed, wind_dir, pressure,
+                            battery_voltage, source_voltage,
+                            rain_min, rain_hour, rain_day, rain_total,
+                            station_status, station_online
+                        FROM weather_readings
+                        WHERE timestamp >= ? AND timestamp <= ?
+                        ORDER BY timestamp ASC
+                    """
+
+                    df_local = pd.read_sql_query(
+                        query,
+                        conn,
+                        params=(start_datetime, end_datetime)
+                    )
+
+                    if not df_local.empty:
+                        df_local['date'] = pd.to_datetime(df_local['date'])
+                    return df_local
+
+            return self._run_with_retry(_query_op, operation_name='get_readings_between')
+
         except Exception as e:
             logger.error(f"Failed to query readings between dates: {e}")
             return pd.DataFrame()

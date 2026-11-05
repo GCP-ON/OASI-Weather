@@ -38,14 +38,16 @@ Date: 2025
 """
 
 import dash
-from dash import html, dcc, Input, Output
+from dash import html, dcc, Input, Output, State
 import plotly.graph_objs as go
 import pandas as pd
 import numpy as np
 import datetime
+import math
 import time
 import json
 import re
+import sqlite3
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import yaml
@@ -60,6 +62,60 @@ import os
 
 
 DEFAULT_BLACK_FRAME_URL = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="1" height="1"%3E%3Crect width="1" height="1" fill="%23000000"/%3E%3C/svg%3E'
+
+HISTORY_PARAMETER_CONFIG = {
+    'temperature': {'label': 'Temperatura (°C)', 'color': '#ef5c42'},
+    'humidity': {'label': 'Umidade (%)', 'color': '#47b0d3'},
+    'dew_point': {'label': 'Ponto de Orvalho (°C)', 'color': '#aa96e3'},
+    'pressure': {'label': 'Pressão (hPa)', 'color': '#7eb8ff'},
+    'wind_speed': {'label': 'Vento (m/s)', 'color': '#76d465'},
+    'wind_dir': {'label': 'Direção do Vento (°)', 'color': '#7fd1b9'},
+    'rain_hour': {'label': 'Chuva por Hora (mm/h)', 'color': '#4cc9f0'},
+    'rain_day': {'label': 'Chuva no Dia (mm)', 'color': '#2ea8d5'},
+    'rain_total': {'label': 'Chuva Total (mm)', 'color': '#1f6f8b'},
+}
+
+HISTORY_STATS_PARAMETER_LABELS = {
+    'temperature': 'Temperatura (°C)',
+    'humidity': 'Umidade (%)',
+    'dew_point': 'Ponto de Orvalho (°C)',
+    'wind_speed': 'Velocidade do Vento (m/s)',
+    'wind_dir': 'Direção do Vento (°)',
+    'pressure': 'Pressão (hPa)',
+    'rain_min': 'Chuva por Minuto (mm)',
+    'rain_hour': 'Chuva por Hora (mm/h)',
+    'rain_day': 'Chuva no Dia (mm)',
+    'rain_total': 'Chuva Total (mm)',
+}
+
+HISTORY_STATS_ICON_BY_PARAM = {
+    'temperature': 'fa-solid fa-thermometer-half',
+    'humidity': 'fa-solid fa-droplet',
+    'dew_point': 'fa-solid fa-temperature-low',
+    'wind_speed': 'fa-solid fa-wind',
+    'wind_dir': 'fa-solid fa-compass',
+    'pressure': 'fa-solid fa-gauge-high',
+    'rain_min': 'fa-solid fa-cloud-rain',
+    'rain_hour': 'fa-solid fa-cloud-rain',
+    'rain_day': 'fa-solid fa-cloud-rain',
+    'rain_total': 'fa-solid fa-cloud-rain',
+}
+
+HISTORY_STATS_COLOR_CLASS_BY_PARAM = {
+    'temperature': 'color-temp',
+    'humidity': 'color-humidity',
+    'dew_point': 'color-dew',
+    'wind_speed': 'color-wind-speed',
+    'wind_dir': 'color-wind-dir',
+    'pressure': 'color-location',
+    'rain_min': 'color-location',
+    'rain_hour': 'color-location',
+    'rain_day': 'color-location',
+    'rain_total': 'color-location',
+}
+
+HISTORY_NEW_MOON_WINDOW_DAYS = 15
+HISTORY_HIGH_WIND_LIMIT_MS = 12.0
 
 # ============================================================================
 # Global State Variables
@@ -217,6 +273,146 @@ app = dash.Dash(__name__, prevent_initial_callbacks=False, update_title=None)
 app.title = "OASI-Weather"
 
 
+def _build_recent_month_options(month_count=24):
+    """Build month dropdown options from current month backwards."""
+    month_names_pt = [
+        'Janeiro', 'Fevereiro', 'Marco', 'Abril', 'Maio', 'Junho',
+        'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
+    ]
+    today = datetime.date.today().replace(day=1)
+    options = []
+    for offset in range(max(1, int(month_count))):
+        year = today.year
+        month = today.month - offset
+        while month <= 0:
+            month += 12
+            year -= 1
+        month_date = datetime.date(year, month, 1)
+        options.append(
+            {
+                'label': f"{month_names_pt[month_date.month - 1]} / {month_date.year}",
+                'value': month_date.strftime('%Y-%m'),
+            }
+        )
+    return options
+
+
+def _month_label_pt(year, month):
+    month_names_pt = [
+        'Janeiro', 'Fevereiro', 'Marco', 'Abril', 'Maio', 'Junho',
+        'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
+    ]
+    return f"{month_names_pt[month - 1]} / {year}"
+
+
+def _build_month_options_between(start_date, end_date):
+    """Build month options between two dates (inclusive), newest first."""
+    start_anchor = start_date.replace(day=1)
+    end_anchor = end_date.replace(day=1)
+    if end_anchor < start_anchor:
+        start_anchor, end_anchor = end_anchor, start_anchor
+
+    options = []
+    current = end_anchor
+    while current >= start_anchor:
+        options.append(
+            {
+                'label': _month_label_pt(current.year, current.month),
+                'value': current.strftime('%Y-%m'),
+            }
+        )
+        if current.month == 1:
+            current = datetime.date(current.year - 1, 12, 1)
+        else:
+            current = datetime.date(current.year, current.month - 1, 1)
+    return options
+
+
+def _get_db_date_bounds(db_path):
+    """Return min/max dates present in weather_readings table."""
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        cursor = conn.cursor()
+        cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM weather_readings")
+        row = cursor.fetchone()
+        conn.close()
+        if not row or row[0] is None or row[1] is None:
+            return None, None
+        min_date = pd.to_datetime(row[0]).date()
+        max_date = pd.to_datetime(row[1]).date()
+        return min_date, max_date
+    except Exception:
+        return None, None
+
+
+def _shift_month_value(month_value, delta):
+    """Shift a YYYY-MM month string by delta months."""
+    base = datetime.datetime.strptime(month_value, '%Y-%m').date().replace(day=1)
+    month = base.month + int(delta)
+    year = base.year
+    while month > 12:
+        month -= 12
+        year += 1
+    while month < 1:
+        month += 12
+        year -= 1
+    return f"{year:04d}-{month:02d}"
+
+
+def _nearest_cardinal_8(angle_degrees):
+    """Return nearest 8-point cardinal for an angle in degrees."""
+    try:
+        angle = float(angle_degrees) % 360.0
+    except (TypeError, ValueError):
+        return 'N/D'
+
+    cardinals = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+    idx = int((angle + 22.5) // 45) % len(cardinals)
+    return cardinals[idx]
+
+
+def _moon_phase_angle_degrees(date_value):
+    """Return moon phase angle in degrees for a given date (0=new moon)."""
+    day_dt = datetime.datetime.combine(date_value, datetime.time(12, 0, 0))
+    j2000 = datetime.datetime(2000, 1, 1, 12, 0, 0)
+    delta = (day_dt - j2000).total_seconds() / 86400.0
+
+    solar_long = 280.466 + 0.9856474 * delta
+    solar_anomaly = math.radians((357.528 + 0.9856003 * delta) % 360)
+    lambda_sun = solar_long + 1.915 * math.sin(solar_anomaly) + 0.020 * math.sin(2 * solar_anomaly)
+
+    lunar_long = 218.316 + 13.176396 * delta
+    lunar_anomaly = math.radians((134.963 + 13.064993 * delta) % 360)
+    lambda_moon = lunar_long + 6.289 * math.sin(lunar_anomaly)
+
+    return (lambda_moon - lambda_sun) % 360
+
+
+def _is_within_new_moon_window(date_value, total_window_days=HISTORY_NEW_MOON_WINDOW_DAYS):
+    """Return True when date is inside a centered new-moon window.
+
+    A 15-day window means +-7 days around new moon (inclusive).
+    """
+    synodic_month_days = 29.530588853
+    half_window_days = max(0, int(total_window_days) // 2)
+    phase_angle = _moon_phase_angle_degrees(date_value)
+    phase_days = (phase_angle / 360.0) * synodic_month_days
+    distance_to_new_moon = min(phase_days, synodic_month_days - phase_days)
+    return distance_to_new_moon <= half_window_days
+
+
+history_db_min_date, history_db_max_date = _get_db_date_bounds(db_path)
+if history_db_min_date is None or history_db_max_date is None:
+    history_default_end = datetime.date.today()
+    history_default_start = history_default_end.replace(day=1)
+else:
+    history_default_end = history_db_max_date
+    history_default_start = history_db_min_date
+
+HISTORY_MONTH_OPTIONS = _build_month_options_between(history_default_start, history_default_end)
+history_default_month_value = HISTORY_MONTH_OPTIONS[0]['value'] if HISTORY_MONTH_OPTIONS else history_default_start.strftime('%Y-%m')
+
+
 @app.server.after_request
 def disable_dash_bundle_cache(response):
     """Prevent stale frontend bundles that can cause ChunkLoadError after restarts."""
@@ -330,6 +526,13 @@ app.index_string = '''
 app.layout = html.Div(
     className="main-container",
     children=[
+        dcc.Location(id='url', refresh=False),
+        html.Div([
+            dcc.Link('Tempo Real', href='/', id='nav-link-live', className='page-nav-link'),
+            dcc.Link('Histórico', href='/history', id='nav-link-history', className='page-nav-link'),
+        ], className='page-nav-bar'),
+
+        html.Div(id='dashboard-page', children=[
         # ----------- Header: Logo, Title, Status ----------- #
         html.Div([
             html.Div([
@@ -624,6 +827,218 @@ app.layout = html.Div(
                 html.A("MCTI", href='https://www.gov.br/mcti/pt-br', target='_blank', rel='noopener noreferrer', className='footer-link'),
             ], className='footer-links')
         ], className="footer")
+
+        ]),
+
+        html.Div(
+            id='history-page',
+            className='history-page',
+            style={'display': 'none'},
+            children=[
+                html.Div([
+                    html.Div([
+                        html.A(
+                            html.Img(
+                                src='/assets/logo-impacton_round.png',
+                                className="logo-img"
+                            ),
+                            href='https://www.gov.br/observatorio/pt-br/assuntos/areas-de-atuacao/astronomia-e-astrofisica/oasi/impacton',
+                            target='_blank',
+                            rel='noopener noreferrer'
+                        ),
+                        html.Div([
+                            html.H1(
+                                "Observatório Astronômico do Sertão de Itaparica",
+                                className="header-title"
+                            ),
+                            html.H3(
+                                "Estação Meteorológica e Câmera de Todo o Céu",
+                                className="header-title"
+                            ),
+                            html.Div([
+                                html.I(className="fa-solid fa-location-dot location-icon"),
+                                html.Span("8° 47' 32,1\" S, 38° 41' 18,7\" O, 390 m", className="location-text")
+                            ], className="header-location")
+                        ], className="header-title"),
+                        html.A(
+                            html.Img(
+                                src='/assets/logo-on_round.png',
+                                className="logo-on-img"
+                            ),
+                            href='https://on.br',
+                            target='_blank',
+                            rel='noopener noreferrer'
+                        )
+                    ], className="header")
+                ], className="header-bar"),
+
+                html.Div([
+                    html.H3('Histórico Meteorológico', className='history-title'),
+                    html.P(
+                        'Explore séries temporais, calendário mensal de aquisição e estatísticas dos dados.',
+                        className='history-subtitle'
+                    ),
+                ], className='history-header'),
+
+                html.Div([
+                    html.Div([
+                        html.Div([
+                            html.Label('Início:', className='history-label'),
+                            dcc.DatePickerSingle(
+                                id='history-start-date',
+                                date=history_default_start,
+                                min_date_allowed=history_db_min_date,
+                                max_date_allowed=history_db_max_date,
+                                display_format='DD/MM/YYYY',
+                                className='history-date-picker history-start-date-picker'
+                            ),
+                        ], className='history-overview-control-group'),
+                        html.Div([
+                            dcc.Checklist(
+                                id='history-end-enabled',
+                                options=[
+                                    {'label': 'Fim', 'value': 'enabled'},
+                                ],
+                                value=['enabled'],
+                                className='history-end-mode-toggle',
+                                inline=True,
+                            ),
+                            dcc.DatePickerSingle(
+                                id='history-end-date',
+                                date=history_default_end,
+                                min_date_allowed=history_db_min_date,
+                                max_date_allowed=history_db_max_date,
+                                display_format='DD/MM/YYYY',
+                                className='history-date-picker history-end-date-picker'
+                            ),
+                        ], className='history-overview-control-group'),
+                        html.Div([
+                            html.Label('Parâmetros para visualização e exportação:', className='history-label'),
+                            dcc.Dropdown(
+                                id='history-parameters-dropdown',
+                                options=[
+                                    {'label': item['label'], 'value': key}
+                                    for key, item in HISTORY_PARAMETER_CONFIG.items()
+                                ],
+                                value=list(HISTORY_PARAMETER_CONFIG.keys()),
+                                multi=True,
+                                clearable=False,
+                                className='history-parameters-dropdown history-export-params-dropdown'
+                            ),
+                            html.Button('Exportar CSV', id='history-export-button', n_clicks=0, className='history-export-button history-export-button-inline'),
+                        ], className='history-overview-control-group history-overview-export-group'),
+                    ], className='history-card history-overview-controls-card'),
+
+                    html.Div([
+                        html.Div([
+                            html.H4('Estatísticas do Período', id='history-stats-heading', className='history-stats-title'),
+                        ], className='history-stats-head'),
+                        html.Div(id='history-stats-table-content'),
+                        html.Div([
+                            dcc.Dropdown(
+                                id='history-stats-mode',
+                                options=[
+                                    {'label': 'Mín / Máx', 'value': 'minmax'},
+                                    {'label': 'Média +-', 'value': 'meanstd'},
+                                    {'label': 'Mediana + MAD', 'value': 'medianmad'},
+                                ],
+                                value='meanstd',
+                                clearable=False,
+                                searchable=False,
+                                className='history-stats-mode-dropdown history-stats-mode-dropdown-compact'
+                            ),
+                        ], className='history-stats-mode-footer')
+                    ], className='history-card history-stats-card'),
+                    html.Div([
+                        html.Div([
+                            html.Div([
+                                html.Button('◀', id='history-month-prev', n_clicks=0, className='history-month-nav-btn'),
+                                dcc.Dropdown(
+                                    id='history-month-selector',
+                                    options=HISTORY_MONTH_OPTIONS,
+                                    value=history_default_month_value,
+                                    clearable=False,
+                                    searchable=False,
+                                    className='history-month-dropdown'
+                                ),
+                                html.Button('▶', id='history-month-next', n_clicks=0, className='history-month-nav-btn'),
+                            ], className='history-month-nav-row'),
+                        ], className='history-calendar-month-controls'),
+                        dcc.Graph(
+                            id='history-calendar-plot',
+                            className='history-calendar-graph',
+                            config={'responsive': False},
+                            style={'height': '410px', 'minHeight': '410px', 'maxHeight': '410px'}
+                        )
+                    ], className='history-card history-calendar-card'),
+                ], className='history-overview-row'),
+
+                html.Div([
+                    html.Div([
+                        html.Div([
+                            html.Label('Estratégia de amostragem:', className='history-label'),
+                            dcc.Dropdown(
+                                id='history-sampling-strategy',
+                                options=[
+                                    {'label': 'Aleatório', 'value': 'random'},
+                                    {'label': 'Min/Max locais', 'value': 'local_minmax'},
+                                    {'label': 'Mediana local', 'value': 'local_median'},
+                                    {'label': 'Uniforme', 'value': 'uniform'},
+                                ],
+                                value='uniform',
+                                clearable=False,
+                                searchable=False,
+                                className='history-sampling-dropdown'
+                            ),
+                        ], className='history-sampling-item'),
+                        html.Div([
+                            html.Label('Número de pontos:', className='history-label'),
+                            dcc.Input(
+                                id='history-sampling-points',
+                                type='number',
+                                min=50,
+                                max=MAX_PLOT_POINTS,
+                                step=50,
+                                value=min(MAX_PLOT_POINTS, PLOT_TARGET_POINTS),
+                                className='history-sampling-points-input'
+                            ),
+                        ], className='history-sampling-item history-sampling-item-small'),
+                    ], className='history-sampling-controls'),
+
+                    html.Div([
+                        html.Div([
+                            dcc.Graph(id='history-temperature-plot', className='plot-graph'),
+                            dcc.Graph(id='history-pressure-plot', className='plot-graph'),
+                        ], className='plot-col'),
+                        html.Div([
+                            dcc.Graph(id='history-humidity-plot', className='plot-graph'),
+                            dcc.Graph(id='history-dew-point-plot', className='plot-graph'),
+                        ], className='plot-col'),
+                        html.Div([
+                            dcc.Graph(id='history-wind-speed-plot', className='plot-graph'),
+                            dcc.Graph(id='history-wind-dir-plot', className='plot-graph'),
+                        ], className='plot-col'),
+                    ], className='plots-row'),
+
+                    html.Div(id='history-sampling-info', className='plot-update-frequency')
+                ], className='history-card'),
+
+                html.Footer([
+                    html.Div("OASI-Weather | Observatório Nacional", className='footer-main'),
+                    html.Div([
+                        html.A("GitHub", href='https://github.com', target='_blank', rel='noopener noreferrer', className='footer-link'),
+                        html.Span(" • ", className='footer-sep'),
+                        html.A("Projeto IMPACTON", href='https://www.gov.br/observatorio/pt-br/assuntos/areas-de-atuacao/astronomia-e-astrofisica/oasi/impacton', target='_blank', rel='noopener noreferrer', className='footer-link'),
+                        html.Span(" • ", className='footer-sep'),
+                        html.A("on.br", href='https://on.br', target='_blank', rel='noopener noreferrer', className='footer-link'),
+                        html.Span(" • ", className='footer-sep'),
+                        html.A("MCTI", href='https://www.gov.br/mcti/pt-br', target='_blank', rel='noopener noreferrer', className='footer-link'),
+                    ], className='footer-links')
+                ], className="footer"),
+
+                dcc.Download(id='history-export-download'),
+            ]
+        )
     ]
 )
 
@@ -753,6 +1168,86 @@ def _downsample_dataframe(df, target_points):
         return df
     idx = np.linspace(0, len(df) - 1, target, dtype=int)
     return df.iloc[idx].copy()
+
+
+def _sample_history_dataframe(df, target_points, strategy='uniform', key_columns=None):
+    """Sample historical data according to a selected strategy.
+
+    Strategies:
+        - uniform: evenly spaced rows across the full range
+        - random: random rows while preserving first/last points
+        - local_minmax: keep local extrema for selected numeric columns
+        - local_median: keep rows closest to local medians
+    """
+    if df.empty:
+        return df
+
+    target = max(1, int(target_points))
+    if len(df) <= target:
+        return df.copy()
+
+    strategy = strategy or 'uniform'
+    valid_columns = [c for c in (key_columns or []) if c in df.columns]
+
+    if strategy == 'uniform':
+        return _downsample_dataframe(df, target)
+
+    if strategy == 'random':
+        if target <= 2:
+            return df.iloc[[0, -1]].copy()
+        rng = np.random.default_rng(seed=42)
+        population = np.arange(1, len(df) - 1)
+        if len(population) <= (target - 2):
+            chosen = population
+        else:
+            chosen = rng.choice(population, size=(target - 2), replace=False)
+        idx = np.concatenate(([0], np.sort(chosen), [len(df) - 1]))
+        return df.iloc[idx].copy()
+
+    if strategy in ('local_minmax', 'local_median'):
+        if not valid_columns:
+            return _downsample_dataframe(df, target)
+
+        if strategy == 'local_minmax':
+            bucket_count = max(1, target // 2)
+        else:
+            bucket_count = max(1, target)
+
+        bucket_size = int(np.ceil(len(df) / bucket_count))
+        selected_idx = {int(df.index[0]), int(df.index[-1])}
+
+        for start in range(0, len(df), bucket_size):
+            chunk = df.iloc[start:start + bucket_size]
+            if chunk.empty:
+                continue
+
+            if strategy == 'local_minmax':
+                added_any = False
+                for col in valid_columns:
+                    series = pd.to_numeric(chunk[col], errors='coerce').dropna()
+                    if series.empty:
+                        continue
+                    selected_idx.add(int(series.idxmin()))
+                    selected_idx.add(int(series.idxmax()))
+                    added_any = True
+                if not added_any:
+                    selected_idx.add(int(chunk.index[len(chunk) // 2]))
+            else:
+                numeric_block = chunk[valid_columns].apply(pd.to_numeric, errors='coerce')
+                numeric_block = numeric_block.dropna(how='all')
+                if numeric_block.empty:
+                    selected_idx.add(int(chunk.index[len(chunk) // 2]))
+                    continue
+                medians = numeric_block.median(axis=0)
+                distances = (numeric_block - medians).abs().sum(axis=1)
+                selected_idx.add(int(distances.idxmin()))
+
+        sampled = df.loc[sorted(selected_idx)].sort_values('date')
+        if len(sampled) > target:
+            sampled = _downsample_dataframe(sampled, target)
+        return sampled.copy()
+
+    return _downsample_dataframe(df, target)
 
 
 def _build_inpe_url(now=None):
@@ -2151,6 +2646,694 @@ def update_inpe_iframe(_n_intervals):
 def update_brightness(brightness_value):
     """Update all-sky image brightness based on slider value."""
     return [{'filter': f'brightness({brightness_value}%)'}]
+
+
+@app.callback(
+    [
+        Output('dashboard-page', 'style'),
+        Output('history-page', 'style'),
+        Output('nav-link-live', 'className'),
+        Output('nav-link-history', 'className'),
+    ],
+    [Input('url', 'pathname')]
+)
+def toggle_pages(pathname):
+    if pathname == '/history':
+        return {'display': 'none'}, {'display': 'block'}, 'page-nav-link', 'page-nav-link page-nav-link-active'
+    return {'display': 'block'}, {'display': 'none'}, 'page-nav-link page-nav-link-active', 'page-nav-link'
+
+
+@app.callback(
+    Output('history-end-date', 'disabled'),
+    [Input('history-end-enabled', 'value')]
+)
+def toggle_history_end_date(end_enabled):
+    return 'enabled' not in (end_enabled or [])
+
+
+@app.callback(
+    [
+        Output('history-month-selector', 'options'),
+        Output('history-month-selector', 'value'),
+    ],
+    [
+        Input('history-month-prev', 'n_clicks'),
+        Input('history-month-next', 'n_clicks'),
+        Input('history-start-date', 'date'),
+        Input('history-end-date', 'date'),
+        Input('history-end-enabled', 'value'),
+    ],
+    [
+        State('history-month-selector', 'value'),
+        State('history-month-selector', 'options'),
+    ]
+)
+def update_history_month_selector(prev_clicks, next_clicks, start_date, end_date, end_enabled, current_month, current_options):
+    del prev_clicks, next_clicks
+    selected = current_month or history_default_month_value
+    triggered = dash.callback_context.triggered[0]['prop_id'].split('.')[0] if dash.callback_context.triggered else None
+
+    if start_date:
+        start_anchor = pd.to_datetime(start_date).date().replace(day=1)
+    else:
+        start_anchor = history_default_start.replace(day=1)
+
+    end_enabled_flag = 'enabled' in (end_enabled or [])
+    if end_enabled_flag and end_date:
+        end_anchor = pd.to_datetime(end_date).date().replace(day=1)
+    else:
+        end_anchor = start_anchor
+
+    month_options = _build_month_options_between(start_anchor, end_anchor)
+    option_values = [opt['value'] for opt in month_options]
+    if not option_values:
+        fallback = [{'label': _month_label_pt(start_anchor.year, start_anchor.month), 'value': start_anchor.strftime('%Y-%m')}]
+        month_options = fallback
+        option_values = [fallback[0]['value']]
+
+    del current_options
+
+    if triggered == 'history-month-prev':
+        candidate = _shift_month_value(selected, -1)
+    elif triggered == 'history-month-next':
+        candidate = _shift_month_value(selected, 1)
+    elif triggered == 'history-start-date' and start_date:
+        candidate = pd.to_datetime(start_date).strftime('%Y-%m')
+    else:
+        candidate = selected
+
+    if candidate in option_values:
+        return month_options, candidate
+    if candidate > option_values[0]:
+        return month_options, option_values[0]
+    if candidate < option_values[-1]:
+        return month_options, option_values[-1]
+    return month_options, option_values[0]
+
+
+@app.callback(
+    [
+        Output('history-calendar-plot', 'figure'),
+        Output('history-temperature-plot', 'figure'),
+        Output('history-pressure-plot', 'figure'),
+        Output('history-humidity-plot', 'figure'),
+        Output('history-dew-point-plot', 'figure'),
+        Output('history-wind-speed-plot', 'figure'),
+        Output('history-wind-dir-plot', 'figure'),
+        Output('history-stats-heading', 'children'),
+        Output('history-stats-table-content', 'children'),
+        Output('history-sampling-info', 'children'),
+    ],
+    [
+        Input('history-start-date', 'date'),
+        Input('history-end-date', 'date'),
+        Input('history-end-enabled', 'value'),
+        Input('history-month-selector', 'value'),
+        Input('history-parameters-dropdown', 'value'),
+        Input('history-stats-mode', 'value'),
+        Input('history-calendar-plot', 'clickData'),
+        Input('history-sampling-strategy', 'value'),
+        Input('history-sampling-points', 'value'),
+    ]
+)
+def update_history_page(start_date, end_date, end_enabled, selected_month, selected_params, stats_mode, click_data, sampling_strategy, sampling_points):
+    def _empty_ts_figure(title_text, yaxis_title):
+        fig = go.Figure()
+        fig.update_layout(
+            template='plotly_dark',
+            title=title_text,
+            xaxis_title='Hora',
+            yaxis_title=yaxis_title,
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            margin=dict(l=56, r=20, t=64, b=42),
+            font=dict(family='DM Sans, Inter, Segoe UI, sans-serif', color='#d8e4f0'),
+        )
+        fig.update_xaxes(showgrid=True, gridcolor='rgba(120, 146, 170, 0.2)', color='#c8d7e7')
+        fig.update_yaxes(showgrid=True, gridcolor='rgba(120, 146, 170, 0.2)', color='#c8d7e7')
+        return fig
+
+    if not start_date:
+        empty = go.Figure()
+        empty.update_layout(template='plotly_dark', title='Sem período selecionado')
+        empty_temp = _empty_ts_figure('Temperatura (°C)', '°C')
+        empty_pressure = _empty_ts_figure('Pressão Atmosférica (hPa)', 'hPa')
+        empty_humidity = _empty_ts_figure('Umidade (%)', '%')
+        empty_dew = _empty_ts_figure('Ponto de Orvalho (°C)', '°C')
+        empty_wind = _empty_ts_figure('Velocidade do Vento (m/s)', 'm/s')
+        empty_dir = _empty_ts_figure('Direção do Vento (°)', 'Direção (°)')
+        return (
+            empty,
+            empty_temp,
+            empty_pressure,
+            empty_humidity,
+            empty_dew,
+            empty_wind,
+            empty_dir,
+            'Estatísticas do Período',
+            html.Div('Selecione um período válido.'),
+            'Amostragem: N/D',
+        )
+
+    params = [p for p in (selected_params or []) if p in HISTORY_PARAMETER_CONFIG]
+    if not params:
+        params = ['temperature']
+
+    start_ts = pd.to_datetime(start_date)
+
+    try:
+        month_anchor = datetime.datetime.strptime(selected_month, '%Y-%m').date().replace(day=1)
+    except (TypeError, ValueError):
+        month_anchor = start_ts.date().replace(day=1)
+
+    if month_anchor.month == 12:
+        month_next = datetime.date(month_anchor.year + 1, 1, 1)
+    else:
+        month_next = datetime.date(month_anchor.year, month_anchor.month + 1, 1)
+    month_last = month_next - datetime.timedelta(days=1)
+
+    month_start_dt = datetime.datetime.combine(month_anchor, datetime.time.min)
+    month_end_dt = datetime.datetime.combine(month_last, datetime.time.max)
+
+    end_enabled_flag = 'enabled' in (end_enabled or [])
+    if end_enabled_flag and end_date:
+        end_ts = pd.to_datetime(end_date) + datetime.timedelta(days=1) - datetime.timedelta(seconds=1)
+        if end_ts < start_ts:
+            start_ts, end_ts = end_ts, start_ts
+        start_dt = start_ts.to_pydatetime()
+        end_dt = end_ts.to_pydatetime()
+        using_month_scope = False
+    else:
+        start_dt = month_start_dt
+        end_dt = month_end_dt
+        using_month_scope = True
+
+    df = db.get_readings_between(start_dt, end_dt)
+    if not df.empty:
+        df = df.sort_values('date')
+
+    month_df = db.get_readings_between(month_start_dt, month_end_dt)
+    month_day_counts = pd.Series(dtype=int)
+    rainy_days_set = set()
+    high_wind_days_set = set()
+    if not month_df.empty:
+        month_df = month_df.sort_values('date')
+        month_day_counts = month_df.groupby(month_df['date'].dt.floor('D')).size()
+
+        rain_mask = pd.Series(False, index=month_df.index)
+        for rain_col in ('rain_min', 'rain_hour', 'rain_day'):
+            if rain_col in month_df.columns:
+                rain_values = pd.to_numeric(month_df[rain_col], errors='coerce').fillna(0.0)
+                rain_mask = rain_mask | (rain_values > 0.0)
+        if rain_mask.any():
+            rainy_days_set = {
+                ts.date() for ts in month_df.loc[rain_mask, 'date'].dt.floor('D').unique()
+            }
+
+        if 'wind_speed' in month_df.columns:
+            wind_values = pd.to_numeric(month_df['wind_speed'], errors='coerce')
+            day_max_wind = wind_values.groupby(month_df['date'].dt.floor('D')).max()
+            high_wind_days_set = {
+                ts.date() for ts, value in day_max_wind.items()
+                if pd.notna(value) and float(value) > HISTORY_HIGH_WIND_LIMIT_MS
+            }
+
+    # Coverage ratio per day: actual records / expected records.
+    # Expected is based on configured persistence cadence.
+    save_interval_seconds = max(1, int(config.get('DATABASE_SAVE_INTERVAL_SECONDS', 30)))
+    expected_full_day = int(round((24 * 60 * 60) / save_interval_seconds))
+    calendar_start = month_anchor - datetime.timedelta(days=month_anchor.weekday())
+    now_local = datetime.datetime.now()
+
+    z = np.full((6, 7), np.nan)
+    custom = np.empty((6, 7), dtype=object)
+    custom[:, :] = None
+    annotations = []
+
+    selected_day = None
+    try:
+        point = (click_data or {}).get('points', [None])[0]
+        custom_point = point.get('customdata') if isinstance(point, dict) else None
+        if custom_point and len(custom_point) >= 5 and bool(custom_point[4]):
+            selected_day = pd.to_datetime(custom_point[0]).date()
+    except Exception:
+        selected_day = None
+
+    coverage_values = []
+    for idx in range(42):
+        day = calendar_start + datetime.timedelta(days=idx)
+        row = idx // 7
+        col = idx % 7
+        in_month = (day.month == month_anchor.month)
+
+        if in_month:
+            day_ts = pd.Timestamp(day)
+            actual_count = int(month_day_counts.get(day_ts, 0)) if not month_day_counts.empty else 0
+
+            day_start_dt = datetime.datetime.combine(day, datetime.time.min)
+            day_end_dt = day_start_dt + datetime.timedelta(days=1)
+            if day > now_local.date():
+                expected_count = 0
+            elif day == now_local.date():
+                covered_seconds = max(0.0, (min(now_local, day_end_dt) - day_start_dt).total_seconds())
+                expected_count = int(round(covered_seconds / save_interval_seconds))
+            else:
+                expected_count = expected_full_day
+
+            coverage = (actual_count / expected_count) if expected_count > 0 else np.nan
+            coverage = float(np.clip(coverage, 0.0, 1.0)) if not np.isnan(coverage) else np.nan
+
+            z[row, col] = coverage
+            coverage_values.append(coverage)
+            custom[row, col] = [
+                day.strftime('%d/%m/%Y'),
+                actual_count,
+                expected_count,
+                (coverage * 100.0) if not np.isnan(coverage) else np.nan,
+                True,
+            ]
+        else:
+            custom[row, col] = ['', 0, 0, np.nan, False]
+
+        icon_style_base = (
+            "display:inline-block;min-width:14px;text-align:center;padding:0 2px;"
+            "border-radius:3px;background:rgba(7,13,20,0.58);"
+            "text-shadow:0 0 2px rgba(2,6,12,0.95),0 0 6px rgba(2,6,12,0.75);"
+            "font-family:\"Font Awesome 6 Free\";font-weight:900;"
+        )
+
+        day_icons = []
+        if in_month:
+            if _is_within_new_moon_window(day):
+                day_icons.append(f"<span style='{icon_style_base}color:#32cd32;'>\uf753</span>")
+            if day in rainy_days_set:
+                day_icons.append(f"<span style='{icon_style_base}color:#39d3ff;'>\uf73d</span>")
+            if day in high_wind_days_set:
+                day_icons.append(f"<span style='{icon_style_base}color:#ff5b74;'>\uf72e</span>")
+
+        day_text = str(day.day)
+        if day_icons:
+            day_text = f"<b>{day.day}</b><br>{'&nbsp;'.join(day_icons)}"
+        else:
+            day_text = f"<b>{day.day}</b>"
+
+        annotations.append(dict(
+            x=col,
+            y=row,
+            text=day_text,
+            showarrow=False,
+            font=dict(
+                size=11,
+                color='#dbe8f5' if in_month else 'rgba(173, 190, 206, 0.35)',
+            ),
+        ))
+
+    selected_day_shape = []
+    if selected_day is not None and selected_day.month == month_anchor.month and selected_day.year == month_anchor.year:
+        selected_idx = (selected_day - calendar_start).days
+        if 0 <= selected_idx < 42:
+            selected_row = selected_idx // 7
+            selected_col = selected_idx % 7
+            selected_day_shape = [dict(
+                type='rect',
+                x0=selected_col - 0.5,
+                x1=selected_col + 0.5,
+                y0=selected_row - 0.5,
+                y1=selected_row + 0.5,
+                line=dict(color='#f3f8fd', width=2),
+                fillcolor='rgba(0,0,0,0)',
+            )]
+
+    calendar_fig = go.Figure(
+        data=[
+            go.Heatmap(
+                z=z,
+                x=list(range(7)),
+                y=list(range(6)),
+                customdata=custom,
+                zmin=0,
+                zmax=1,
+                colorscale=[
+                    [0.0, '#3d2228'],
+                    [0.5, '#5a4d2a'],
+                    [1.0, '#1f4a3a'],
+                ],
+                xgap=2,
+                ygap=2,
+                colorbar={
+                    'title': {'text': 'Dados adquiridos (%)', 'side': 'right'},
+                    'tickvals': [0.0, 0.25, 0.5, 0.75, 1.0],
+                    'ticktext': ['0', '25', '50', '75', '100'],
+                    'lenmode': 'pixels',
+                    'len': 250,
+                    'y': 0.5,
+                    'yanchor': 'middle',
+                    'thicknessmode': 'pixels',
+                    'thickness': 12,
+                },
+                hovertemplate=(
+                    'Data: %{customdata[0]}<br>'
+                    'Registros: %{customdata[1]} / %{customdata[2]}<br>'
+                    'Cobertura: %{customdata[3]:.1f}%<extra></extra>'
+                ),
+            )
+        ]
+    )
+    calendar_fig.update_layout(
+        template='plotly_dark',
+        title='',
+        xaxis_title='',
+        yaxis_title='',
+        autosize=False,
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=44, r=20, t=28, b=40),
+        height=410,
+        font=dict(family='DM Sans, Inter, Segoe UI, sans-serif', color='#d8e4f0'),
+        annotations=annotations,
+        shapes=selected_day_shape,
+    )
+    calendar_fig.update_xaxes(
+        tickmode='array',
+        tickvals=list(range(7)),
+        ticktext=['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'],
+        showgrid=True,
+        gridcolor='rgba(120, 146, 170, 0.18)',
+        color='#c8d7e7',
+        zeroline=False,
+        constrain='domain',
+    )
+    calendar_fig.update_yaxes(
+        tickmode='array',
+        tickvals=list(range(6)),
+        ticktext=[''] * 6,
+        showgrid=True,
+        gridcolor='rgba(120, 146, 170, 0.12)',
+        autorange='reversed',
+        zeroline=False,
+        constrain='domain',
+    )
+
+    stats_df = df
+    stats_scope_start = start_dt
+    stats_scope_end = end_dt
+    if selected_day is not None:
+        selected_start = datetime.datetime.combine(selected_day, datetime.time.min)
+        selected_end = datetime.datetime.combine(selected_day, datetime.time.max)
+        selected_df = db.get_readings_between(selected_start, selected_end)
+        if not selected_df.empty:
+            stats_df = selected_df.sort_values('date')
+            stats_scope_start = selected_start
+            stats_scope_end = selected_end
+
+    if stats_df.empty:
+        empty_temp = _empty_ts_figure('Temperatura (°C)', '°C')
+        empty_pressure = _empty_ts_figure('Pressão Atmosférica (hPa)', 'hPa')
+        empty_humidity = _empty_ts_figure('Umidade (%)', '%')
+        empty_dew = _empty_ts_figure('Ponto de Orvalho (°C)', '°C')
+        empty_wind = _empty_ts_figure('Velocidade do Vento (m/s)', 'm/s')
+        empty_dir = _empty_ts_figure('Direção do Vento (°)', 'Direção (°)')
+        stats_content = html.Div('Nenhum dado encontrado para o período selecionado.', className='history-empty-text')
+        stats_heading = 'Estatísticas do Período' if not using_month_scope else 'Estatísticas do Mês'
+        return (
+            calendar_fig,
+            empty_temp,
+            empty_pressure,
+            empty_humidity,
+            empty_dew,
+            empty_wind,
+            empty_dir,
+            stats_heading,
+            stats_content,
+            'Amostragem: 0/0 (0.0%)',
+        )
+
+    try:
+        requested_points = int(sampling_points) if sampling_points is not None else PLOT_TARGET_POINTS
+    except (TypeError, ValueError):
+        requested_points = PLOT_TARGET_POINTS
+    requested_points = max(50, min(MAX_PLOT_POINTS, requested_points))
+
+    sample_columns = ['temperature', 'pressure', 'humidity', 'dew_point', 'wind_speed', 'wind_dir']
+    plot_df = _sample_history_dataframe(
+        stats_df,
+        requested_points,
+        strategy=sampling_strategy,
+        key_columns=sample_columns,
+    )
+
+    raw_points = int(len(stats_df))
+    sampled_points = int(len(plot_df))
+    sample_ratio = (100.0 * sampled_points / raw_points) if raw_points > 0 else 0.0
+    sampling_labels = {
+        'uniform': 'Uniforme',
+        'random': 'Aleatório',
+        'local_minmax': 'Min/Max locais',
+        'local_median': 'Mediana local',
+    }
+    sampling_info = (
+        f"Amostragem: {sampling_labels.get(sampling_strategy or 'uniform', 'Uniforme')}"
+        f" | Pontos: {sampled_points}/{raw_points} ({sample_ratio:.1f}%)"
+    )
+
+    temp_series = pd.to_numeric(plot_df.get('temperature', pd.Series(dtype=float)), errors='coerce')
+    pressure_series = pd.to_numeric(plot_df.get('pressure', pd.Series(dtype=float)), errors='coerce')
+    humidity_series = pd.to_numeric(plot_df.get('humidity', pd.Series(dtype=float)), errors='coerce')
+    dew_series = pd.to_numeric(plot_df.get('dew_point', pd.Series(dtype=float)), errors='coerce')
+    wind_series = pd.to_numeric(plot_df.get('wind_speed', pd.Series(dtype=float)), errors='coerce')
+    dir_series = pd.to_numeric(plot_df.get('wind_dir', pd.Series(dtype=float)), errors='coerce')
+
+    temp_fig = go.Figure(
+        data=[go.Scatter(x=plot_df['date'], y=temp_series, mode='lines', line={'color': '#ef5c42'}, name='Temperatura')],
+        layout={'template': 'plotly_dark', 'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf2c8</span>&nbsp;&nbsp;Temperatura (°C)", 'xaxis': {'title': 'Hora'}, 'yaxis': {'title': '°C'}}
+    )
+    pressure_fig = go.Figure(
+        data=[go.Scatter(x=plot_df['date'], y=pressure_series, mode='lines', line={'color': '#7eb8ff'}, name='Pressão')],
+        layout={'template': 'plotly_dark', 'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf625</span>&nbsp;&nbsp;Pressão Atmosférica (hPa)", 'xaxis': {'title': 'Hora'}, 'yaxis': {'title': 'hPa'}}
+    )
+    humidity_fig = go.Figure(
+        data=[go.Scatter(x=plot_df['date'], y=humidity_series, mode='lines', line={'color': '#47b0d3'}, name='Umidade')],
+        layout={'template': 'plotly_dark', 'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf043</span>&nbsp;&nbsp;Umidade (%)", 'xaxis': {'title': 'Hora'}, 'yaxis': {'title': '%'}}
+    )
+    dew_fig = go.Figure(
+        data=[go.Scatter(x=plot_df['date'], y=dew_series, mode='lines', line={'color': '#aa96e3'}, name='Ponto de Orvalho')],
+        layout={'template': 'plotly_dark', 'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf76b</span>&nbsp;&nbsp;Ponto de Orvalho (°C)", 'xaxis': {'title': 'Hora'}, 'yaxis': {'title': '°C'}}
+    )
+    wind_fig = go.Figure(
+        data=[
+            go.Scatter(x=plot_df['date'], y=wind_series, mode='lines', line={'color': '#76d465'}, name='Velocidade do Vento', showlegend=False),
+            go.Scatter(x=plot_df['date'], y=np.full(len(plot_df), 12.0), mode='lines', name='12 m/s', line={'color': '#e74c3c', 'width': 2, 'dash': 'dash'})
+        ],
+        layout={
+            'template': 'plotly_dark',
+            'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf72e</span>&nbsp;&nbsp;Velocidade do Vento (m/s)",
+            'xaxis': {'title': 'Hora'},
+            'yaxis': {'title': 'm/s'},
+            'showlegend': True,
+            'legend': {
+                'x': 0.5,
+                'y': 1.005,
+                'xanchor': 'center',
+                'yanchor': 'bottom',
+                'font': {'size': 13, 'color': '#d8e4f0'},
+                'bgcolor': 'rgba(0,0,0,0)',
+                'borderwidth': 0,
+                'orientation': 'h',
+                'itemsizing': 'constant',
+                'itemwidth': 30
+            },
+        }
+    )
+
+    x_range = [plot_df['date'].min(), plot_df['date'].max()] if not plot_df.empty else None
+    dir_fig = go.Figure(
+        data=[go.Scatter(x=plot_df['date'], y=dir_series, mode='markers', marker={'color': '#7fd1b9', 'size': 6}, name='Direção do Vento')],
+        layout={
+            'template': 'plotly_dark',
+            'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf14e</span>&nbsp;&nbsp;Direção do Vento (°)",
+            'xaxis': {'title': 'Hora', 'range': x_range, 'tickangle': 0},
+            'yaxis': {
+                'title': 'Direção (°)',
+                'range': [0, 360],
+                'fixedrange': True,
+                'tickmode': 'array',
+                'tickvals': [0, 90, 180, 270, 360],
+                'ticktext': ['N (0°)', 'L (90°)', 'S (180°)', 'O (270°)', '']
+            },
+        }
+    )
+
+    history_figures = [temp_fig, pressure_fig, humidity_fig, dew_fig, wind_fig, dir_fig]
+    for figure in history_figures:
+        figure.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            margin=dict(l=56, r=20, t=64, b=42),
+            font=dict(family='DM Sans, Inter, Segoe UI, sans-serif', color='#d8e4f0'),
+            hoverlabel=dict(bgcolor='rgba(14, 23, 34, 0.96)', bordercolor='#4a6078', font=dict(color='#ebf2f9')),
+        )
+        figure.update_xaxes(showgrid=True, gridcolor='rgba(120, 146, 170, 0.2)', color='#c8d7e7')
+        figure.update_yaxes(showgrid=True, gridcolor='rgba(120, 146, 170, 0.2)', color='#c8d7e7')
+
+    total_days_month = int(month_last.day)
+    rainy_days_month = 0
+    if not month_df.empty:
+        rain_masks = []
+        for rain_col in ('rain_min', 'rain_hour', 'rain_day'):
+            if rain_col in month_df.columns:
+                rain_series = pd.to_numeric(month_df[rain_col], errors='coerce').fillna(0)
+                rain_masks.append(rain_series > 0)
+        if rain_masks:
+            rain_any = rain_masks[0]
+            for mask in rain_masks[1:]:
+                rain_any = rain_any | mask
+            rainy_days_month = int(month_df.loc[rain_any, 'date'].dt.floor('D').nunique())
+
+    mode = stats_mode or 'minmax'
+    stats_lines = []
+    for param, label in HISTORY_STATS_PARAMETER_LABELS.items():
+        if param in ('rain_min', 'rain_hour', 'rain_total'):
+            continue
+        if param not in stats_df.columns:
+            continue
+        numeric = pd.to_numeric(stats_df[param], errors='coerce')
+        valid = numeric.dropna()
+        if mode == 'meanstd':
+            metrics_text = (
+                (f"{valid.mean():.1f} +- {valid.std(ddof=0):.1f}")
+                if not valid.empty else
+                "N/D +- N/D"
+            )
+            if param == 'wind_dir' and not valid.empty:
+                metrics_text = f"{metrics_text} ({_nearest_cardinal_8(valid.mean())})"
+        elif mode == 'medianmad':
+            if not valid.empty:
+                med = float(valid.median())
+                mad = float((valid - med).abs().median())
+                metrics_text = f"{med:.1f} | MAD: {mad:.1f}"
+                if param == 'wind_dir':
+                    metrics_text = f"{metrics_text} ({_nearest_cardinal_8(med)})"
+            else:
+                metrics_text = "N/D | MAD: N/D"
+        else:
+            metrics_text = (
+                (f"Mín: {valid.min():.1f} | Máx: {valid.max():.1f}")
+                if not valid.empty else
+                "Mín: N/D | Máx: N/D"
+            )
+            if param == 'wind_dir' and not valid.empty:
+                metrics_text = (
+                    f"Mín: {valid.min():.1f} ({_nearest_cardinal_8(valid.min())})"
+                    f" | Máx: {valid.max():.1f} ({_nearest_cardinal_8(valid.max())})"
+                )
+
+        color_class = HISTORY_STATS_COLOR_CLASS_BY_PARAM.get(param, 'color-location')
+
+        stats_lines.append(
+            html.P([
+                html.I(className=f"{HISTORY_STATS_ICON_BY_PARAM.get(param, 'fa-solid fa-chart-line')} info-icon"),
+                f"{label}: ",
+                html.Span(
+                    metrics_text,
+                    className=color_class
+                )
+            ])
+        )
+
+    if not stats_lines:
+        stats_lines.append(html.P('Sem parâmetros numéricos disponíveis.'))
+
+    scope_seconds = max(0.0, (stats_scope_end - stats_scope_start).total_seconds())
+    expected_scope_count = int(round((scope_seconds + 1.0) / max(1, int(config.get('DATABASE_SAVE_INTERVAL_SECONDS', 30)))))
+    actual_scope_count = int(len(stats_df))
+    valid_scope_pct = (100.0 * actual_scope_count / expected_scope_count) if expected_scope_count > 0 else 0.0
+    scope_text = f"(regs./disp.): {valid_scope_pct:.1f}% ({actual_scope_count}/{expected_scope_count})"
+    stats_lines.append(
+        html.P([
+            html.I(className='fa-solid fa-cloud-rain info-icon'),
+            'Dias com chuva no período: ',
+            html.Span(f'{rainy_days_month}/{total_days_month}', className='color-location')
+        ])
+    )
+
+    stats_lines.append(
+        html.P([
+            html.I(className='fa-solid fa-percent info-icon'),
+            'Cobertura: ',
+            html.Span(scope_text, className='color-location')
+        ])
+    )
+
+    stats_heading = 'Estatísticas do Período' if not using_month_scope else 'Estatísticas do Mês'
+    stats_content = html.Div(stats_lines, className='info-box history-stats-info-box')
+    return (
+        calendar_fig,
+        temp_fig,
+        pressure_fig,
+        humidity_fig,
+        dew_fig,
+        wind_fig,
+        dir_fig,
+        stats_heading,
+        stats_content,
+        sampling_info,
+    )
+
+
+@app.callback(
+    Output('history-export-download', 'data'),
+    [Input('history-export-button', 'n_clicks')],
+    [
+        State('history-start-date', 'date'),
+        State('history-end-date', 'date'),
+        State('history-end-enabled', 'value'),
+        State('history-month-selector', 'value'),
+        State('history-parameters-dropdown', 'value'),
+    ],
+    prevent_initial_call=True
+)
+def export_history_csv(n_clicks, start_date, end_date, end_enabled, selected_month, selected_params):
+    if not n_clicks or not start_date:
+        return dash.no_update
+
+    params = [p for p in (selected_params or []) if p in HISTORY_PARAMETER_CONFIG]
+    if not params:
+        params = ['temperature']
+
+    start_ts = pd.to_datetime(start_date)
+
+    try:
+        month_anchor = datetime.datetime.strptime(selected_month, '%Y-%m').date().replace(day=1)
+    except (TypeError, ValueError):
+        month_anchor = start_ts.date().replace(day=1)
+
+    if month_anchor.month == 12:
+        month_next = datetime.date(month_anchor.year + 1, 1, 1)
+    else:
+        month_next = datetime.date(month_anchor.year, month_anchor.month + 1, 1)
+    month_last = month_next - datetime.timedelta(days=1)
+
+    end_enabled_flag = 'enabled' in (end_enabled or [])
+    if end_enabled_flag and end_date:
+        end_ts = pd.to_datetime(end_date) + datetime.timedelta(days=1) - datetime.timedelta(seconds=1)
+        if end_ts < start_ts:
+            start_ts, end_ts = end_ts, start_ts
+        start_dt = start_ts.to_pydatetime()
+        end_dt = end_ts.to_pydatetime()
+    else:
+        start_dt = datetime.datetime.combine(month_anchor, datetime.time.min)
+        end_dt = datetime.datetime.combine(month_last, datetime.time.max)
+
+    df = db.get_readings_between(start_dt, end_dt)
+    if df.empty:
+        empty_df = pd.DataFrame(columns=['date'] + params)
+        filename = f"oasi_weather_history_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.csv"
+        return dcc.send_data_frame(empty_df.to_csv, filename=filename, index=False)
+
+    export_cols = ['date'] + [col for col in params if col in df.columns]
+    export_df = df[export_cols].copy()
+    filename = f"oasi_weather_history_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.csv"
+    return dcc.send_data_frame(export_df.to_csv, filename=filename, index=False)
 
 
 # ============================================================================
