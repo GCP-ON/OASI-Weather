@@ -134,6 +134,13 @@ db = None
 #: datetime: Timestamp of last database save
 last_db_save = None
 
+# Monotonic deadline for fixed-cadence DB saves (prevents cumulative drift).
+next_db_save_monotonic = None
+
+# Rolling delay samples (seconds) between expected and actual DB save time.
+db_save_delay_samples = deque(maxlen=600)
+db_save_count = 0
+
 #: datetime: Timestamp of the last point successfully stored in the database
 last_db_point_time = None
 
@@ -1179,6 +1186,7 @@ def _acquisition_loop():
     global latest_station_row, latest_station_status, latest_station_online
     global latest_station_error, station_fail_streak, station_backoff_seconds
     global station_future, station_future_started_at
+    global next_db_save_monotonic, db_save_delay_samples, db_save_count
 
     station_config = config.get('WEATHER_STATION_CONFIG', 'sigma.yaml')
     if not os.path.isabs(station_config):
@@ -1188,6 +1196,9 @@ def _acquisition_loop():
         loop_started = time.monotonic()
         try:
             save_interval = max(1, int(config.get('DATABASE_SAVE_INTERVAL_SECONDS', 30)))
+            if next_db_save_monotonic is None:
+                next_db_save_monotonic = loop_started + save_interval
+
             _start_station_fetch(station_config)
             future = station_future
             try:
@@ -1221,13 +1232,31 @@ def _acquisition_loop():
                     station_future_started_at = None
 
             now = datetime.datetime.now()
-            if last_db_save is None or (now - last_db_save).total_seconds() >= save_interval:
+            now_mono = time.monotonic()
+            if now_mono >= next_db_save_monotonic:
+                delay_seconds = max(0.0, now_mono - next_db_save_monotonic)
                 if latest_station_row is not None:
                     row_to_save = dict(latest_station_row)
                     row_to_save['date'] = now
                 else:
                     row_to_save = _build_offline_row(now)
                 _persist_reading(row_to_save, now)
+
+                if last_db_save == now:
+                    db_save_count += 1
+                    db_save_delay_samples.append(delay_seconds)
+                    while next_db_save_monotonic <= now_mono:
+                        next_db_save_monotonic += save_interval
+
+                    if db_save_count % 120 == 0 and db_save_delay_samples:
+                        p95_delay = float(np.percentile(np.array(db_save_delay_samples), 95))
+                        avg_delay = float(np.mean(np.array(db_save_delay_samples)))
+                        print(
+                            "Acquisition timing: "
+                            f"saves={db_save_count}, "
+                            f"avg_delay={avg_delay:.3f}s, "
+                            f"p95_delay={p95_delay:.3f}s"
+                        )
         except Exception as e:
             print(f"Warning: acquisition loop error: {e}")
 
