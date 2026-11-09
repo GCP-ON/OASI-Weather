@@ -445,6 +445,19 @@ def serve_allsky_latest():
     return send_file(latest_path, mimetype='image/jpeg', max_age=0, conditional=True)
 
 
+@app.server.route('/allsky/<path:filename>')
+def serve_allsky_asset(filename):
+    """Serve all-sky static assets from src/data/allsky safely."""
+    allsky_dir = os.path.join(os.path.dirname(__file__), 'data', 'allsky')
+    asset_path = os.path.normpath(os.path.join(allsky_dir, filename))
+    allsky_dir_norm = os.path.normpath(allsky_dir)
+    if not asset_path.startswith(allsky_dir_norm):
+        abort(404)
+    if not os.path.exists(asset_path):
+        abort(404)
+    return send_file(asset_path, mimetype='image/jpeg', max_age=0, conditional=True)
+
+
 @app.server.route('/_favicon.ico')
 @app.server.route('/favicon.ico')
 def serve_custom_favicon():

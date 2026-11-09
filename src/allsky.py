@@ -62,6 +62,19 @@ def _latest_assets_image_url():
     return f"/allsky/latest.jpg?t={cache_buster}"
 
 
+def _allsky_assets_image_url(filename):
+    """Return URL with cache buster for a static image under data/allsky."""
+    image_path = Path(__file__).parent / 'data' / 'allsky' / filename
+    if not image_path.exists():
+        return None
+
+    try:
+        cache_buster = int(image_path.stat().st_mtime)
+    except Exception:
+        cache_buster = int(datetime.datetime.now().timestamp())
+    return f"/allsky/{filename}?t={cache_buster}"
+
+
 def get_camera_status():
     """Return camera connection status for dashboard display."""
     global _camera_online
@@ -282,6 +295,99 @@ def _is_nighttime(config):
         _warn_once_per_minute(f"Error checking nighttime: {e}")
         # Default to allowing capture if check fails
         return True
+
+
+def _moon_phase_angle_degrees(date_value):
+    """Return lunar phase angle in degrees (0 = new moon)."""
+    day_dt = datetime.datetime.combine(date_value, datetime.time(12, 0, 0))
+    j2000 = datetime.datetime(2000, 1, 1, 12, 0, 0)
+    delta_days = (day_dt - j2000).total_seconds() / 86400.0
+
+    solar_long = 280.466 + 0.9856474 * delta_days
+    solar_anomaly = np.radians((357.528 + 0.9856003 * delta_days) % 360)
+    lambda_sun = solar_long + 1.915 * np.sin(solar_anomaly) + 0.020 * np.sin(2 * solar_anomaly)
+
+    lunar_long = 218.316 + 13.176396 * delta_days
+    lunar_anomaly = np.radians((134.963 + 13.064993 * delta_days) % 360)
+    lambda_moon = lunar_long + 6.289 * np.sin(lunar_anomaly)
+
+    return float((lambda_moon - lambda_sun) % 360)
+
+
+def _is_within_new_moon_window(date_value, total_window_nights=15):
+    """Return True when date is inside +/- half-window around new moon."""
+    synodic_month_days = 29.530588853
+    half_window_days = max(0, int(total_window_nights) // 2)
+    phase_angle = _moon_phase_angle_degrees(date_value)
+    phase_days = (phase_angle / 360.0) * synodic_month_days
+    distance_to_new_moon = min(phase_days, synodic_month_days - phase_days)
+    return distance_to_new_moon <= half_window_days
+
+
+def _classify_allsky_period(config):
+    """Classify current all-sky period.
+
+    Returns one of: 'daytime', 'night_observation', 'night_outside_window',
+    'unknown'.
+    """
+    global _sun_times_cache_date, _sunrise_cached, _sunset_cached
+    global _last_nighttime_warning_at
+
+    def _warn_once_per_minute(message):
+        global _last_nighttime_warning_at
+        now_local = datetime.datetime.now()
+        if (
+            _last_nighttime_warning_at is None
+            or (now_local - _last_nighttime_warning_at).total_seconds() >= 60
+        ):
+            logger.warning(message)
+            _last_nighttime_warning_at = now_local
+
+    try:
+        from .util import get_sun_times
+
+        latitude = config.get('metadata', {}).get('latitude', -8.79225)
+        longitude = config.get('metadata', {}).get('longitude', -38.68853)
+        sunrise_str, sunset_str = get_sun_times(latitude, longitude)
+        now = datetime.datetime.now()
+
+        if sunrise_str == "N/D" or sunset_str == "N/D":
+            if _sunrise_cached and _sunset_cached:
+                sunrise_str, sunset_str = _sunrise_cached, _sunset_cached
+                _warn_once_per_minute(
+                    "Sunrise/sunset service returned N/D; using cached values"
+                )
+            else:
+                _warn_once_per_minute(
+                    "Sunrise/sunset service returned N/D and no cache is available"
+                )
+                return 'unknown'
+
+        sunrise_time = _parse_time_string(sunrise_str)
+        sunset_time = _parse_time_string(sunset_str)
+
+        _sun_times_cache_date = now.date()
+        _sunrise_cached = sunrise_str
+        _sunset_cached = sunset_str
+
+        today = now.date()
+        sunrise_today = datetime.datetime.combine(today, sunrise_time)
+        sunset_today = datetime.datetime.combine(today, sunset_time)
+
+        if sunrise_today <= now < sunset_today:
+            return 'daytime'
+
+        # After midnight and before sunrise belongs to previous observational night.
+        night_anchor_date = today - datetime.timedelta(days=1) if now < sunrise_today else today
+
+        schedule = config.get('schedule', {})
+        window_nights = int(schedule.get('observation_window_nights', 15))
+        if _is_within_new_moon_window(night_anchor_date, window_nights):
+            return 'night_observation'
+        return 'night_outside_window'
+    except Exception as e:
+        _warn_once_per_minute(f"Error classifying all-sky period: {e}")
+        return 'unknown'
 
 
 def _connect_ascom_camera(device_ids, timeout=10, use_chooser_on_failure=False):
@@ -632,8 +738,12 @@ def _save_image(pil_img, config):
 def read_allsky(allsky_config_path):
     """Capture and return all-sky camera image URL.
     
-    Main entry point for all-sky camera integration. Only captures images
-    during nighttime (after sunset). Returns placeholder during day or on error.
+    Main entry point for all-sky camera integration.
+
+    Behavior:
+    - Daytime (sunrise->sunset): returns disconnected placeholder image.
+    - Night in 15-night window around new moon: captures and returns latest.
+    - Night outside observation window: returns outside-window placeholder.
     
     Args:
         allsky_config_path (str): Path to oculus.yaml configuration file.
@@ -659,15 +769,25 @@ def read_allsky(allsky_config_path):
         logger.error(f"Failed to load config: {e}")
         return _BLACK_FRAME_URL
     
-    # Check if it's nighttime
-    if not _is_nighttime(config):
+    period_state = _classify_allsky_period(config)
+    if period_state == 'daytime':
         logger.info("Daytime - skipping image capture")
         _camera_online = False
-        daytime_img = config.get('schedule', {}).get(
-            'daytime_placeholder', 
-            '/assets/daytime_placeholder.jpg'
-        )
-        return _normalize_dashboard_path(daytime_img)
+        daytime_url = _allsky_assets_image_url('desconectada.jpg')
+        if daytime_url:
+            return daytime_url
+        return _BLACK_FRAME_URL
+
+    if period_state == 'night_outside_window':
+        logger.info("Nighttime outside observation window - skipping image capture")
+        _camera_online = False
+        outside_url = _allsky_assets_image_url('fora_janela.jpg')
+        if outside_url:
+            return outside_url
+        return _BLACK_FRAME_URL
+
+    if period_state == 'unknown':
+        logger.warning("All-sky period unknown; allowing capture as fallback")
     
     # Check if ASCOM is available
     if not ASCOM_AVAILABLE:
