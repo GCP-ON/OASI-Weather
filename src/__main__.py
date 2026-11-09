@@ -49,7 +49,8 @@ import json
 import re
 import sqlite3
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import yaml
 from flask import send_file, abort, request, jsonify
 from urllib import request as urlrequest, parse as urlparse
@@ -1149,6 +1150,100 @@ def _reset_station_executor():
         old_executor.shutdown(wait=False)
 
 
+def _persist_reading(row, now):
+    """Insert a reading in the DB and mirror it into the in-memory cache."""
+    global weather_data, last_db_save, last_db_point_time
+    try:
+        inserted_id = db.insert_reading(row)
+    except Exception as e:
+        print(f"Warning: Failed to save to database: {e}")
+        return
+    if inserted_id is None:
+        return
+    last_db_save = now
+    last_db_point_time = pd.to_datetime(row['date'])
+    cutoff = now - datetime.timedelta(days=MEMORY_RETENTION_DAYS)
+    # Build a new list and rebind so concurrent readers never see a partial list.
+    updated = [r for r in weather_data if r['date'] >= cutoff]
+    updated.append(row)
+    weather_data = updated[-MEMORY_MAX_ROWS:]
+
+
+def _acquisition_loop():
+    """Poll the station every WEATHER_FETCH_INTERVAL_SECONDS and persist a
+    reading every DATABASE_SAVE_INTERVAL_SECONDS, regardless of any client."""
+    global latest_station_row, latest_station_status, latest_station_online
+    global latest_station_error, station_fail_streak, station_backoff_seconds
+    global station_future, station_future_started_at
+
+    station_config = config.get('WEATHER_STATION_CONFIG', 'sigma.yaml')
+    if not os.path.isabs(station_config):
+        station_config = os.path.join(os.path.dirname(__file__), station_config)
+
+    while True:
+        loop_started = time.monotonic()
+        try:
+            save_interval = max(1, int(config.get('DATABASE_SAVE_INTERVAL_SECONDS', 30)))
+            _start_station_fetch(station_config)
+            future = station_future
+            try:
+                row = future.result(timeout=STATION_FUTURE_TIMEOUT_SECONDS)
+                latest_station_row = row
+                latest_station_online = bool(row.get('station_online', True))
+                latest_station_status = "Conectado" if latest_station_online else "Desconectado"
+                latest_station_error = None
+                station_fail_streak = 0
+                station_backoff_seconds = WEATHER_FETCH_INTERVAL_SECONDS
+                station_future = None
+                station_future_started_at = None
+            except Exception as e:
+                timed_out = isinstance(e, FuturesTimeoutError)
+                latest_station_row = None
+                latest_station_online = False
+                latest_station_status = "Desconectado"
+                latest_station_error = (
+                    f"Leitura da estacao excedeu {STATION_FUTURE_TIMEOUT_SECONDS:.1f}s; reiniciando polling"
+                    if timed_out else str(e)
+                )
+                station_fail_streak += 1
+                station_backoff_seconds = min(
+                    STATION_MAX_BACKOFF_SECONDS,
+                    WEATHER_FETCH_INTERVAL_SECONDS * (2 ** min(station_fail_streak, 6)),
+                )
+                if timed_out:
+                    _reset_station_executor()
+                else:
+                    station_future = None
+                    station_future_started_at = None
+
+            now = datetime.datetime.now()
+            if last_db_save is None or (now - last_db_save).total_seconds() >= save_interval:
+                if latest_station_row is not None:
+                    row_to_save = dict(latest_station_row)
+                    row_to_save['date'] = now
+                else:
+                    row_to_save = _build_offline_row(now)
+                _persist_reading(row_to_save, now)
+        except Exception as e:
+            print(f"Warning: acquisition loop error: {e}")
+
+        interval = max(WEATHER_FETCH_INTERVAL_SECONDS, station_backoff_seconds)
+        time.sleep(max(0.1, interval - (time.monotonic() - loop_started)))
+
+
+_acquisition_thread = None
+
+
+def start_acquisition_thread():
+    """Start the background acquisition thread once per process."""
+    global _acquisition_thread
+    if _acquisition_thread is None or not _acquisition_thread.is_alive():
+        _acquisition_thread = threading.Thread(
+            target=_acquisition_loop, name='station-acquisition', daemon=True
+        )
+        _acquisition_thread.start()
+
+
 def _start_allsky_fetch(allsky_config_path):
     """Submit a non-blocking all-sky read when worker is idle."""
     global allsky_future, allsky_future_started_at, last_allsky_poll
@@ -1691,56 +1786,8 @@ def update_dashboard(minutes, n_intervals):
     if not os.path.isabs(station_config):
         station_config = os.path.join(os.path.dirname(__file__), station_config)
 
-    # Keep acquisition always active, throttled by WEATHER_FETCH_INTERVAL_SECONDS.
-    station_poll_interval = max(WEATHER_FETCH_INTERVAL_SECONDS, station_backoff_seconds)
-    if station_future is None and (
-        last_station_poll is None
-        or (now - last_station_poll).total_seconds() >= station_poll_interval
-    ):
-        _start_station_fetch(station_config)
-
-    if station_future is not None and station_future.done():
-        try:
-            fetched_row = station_future.result()
-            latest_station_row = fetched_row
-            latest_station_online = bool(fetched_row.get('station_online', True))
-            latest_station_status = "Conectado" if latest_station_online else "Desconectado"
-            latest_station_error = None
-            station_fail_streak = 0
-            station_backoff_seconds = WEATHER_FETCH_INTERVAL_SECONDS
-        except Exception as e:
-            latest_station_row = None
-            latest_station_status = "Desconectado"
-            latest_station_online = False
-            latest_station_error = str(e)
-            station_fail_streak += 1
-            station_backoff_seconds = min(
-                STATION_MAX_BACKOFF_SECONDS,
-                WEATHER_FETCH_INTERVAL_SECONDS * (2 ** min(station_fail_streak, 6)),
-            )
-        finally:
-            station_future = None
-            station_future_started_at = None
-
-    # Recover when a station poll blocks for too long.
-    if (
-        station_future is not None
-        and station_future_started_at is not None
-        and (now - station_future_started_at).total_seconds() > STATION_FUTURE_TIMEOUT_SECONDS
-    ):
-        latest_station_row = None
-        latest_station_online = False
-        latest_station_status = "Desconectado"
-        latest_station_error = (
-            f"Leitura da estacao excedeu {STATION_FUTURE_TIMEOUT_SECONDS:.1f}s; reiniciando polling"
-        )
-        station_fail_streak += 1
-        station_backoff_seconds = min(
-            STATION_MAX_BACKOFF_SECONDS,
-            WEATHER_FETCH_INTERVAL_SECONDS * (2 ** min(station_fail_streak, 6)),
-        )
-        _reset_station_executor()
-
+    # Station polling and DB persistence run in _acquisition_loop (background
+    # thread), independent of browser sessions. This callback only renders.
     if latest_station_row is not None:
         new_row = dict(latest_station_row)
         new_row['date'] = now
@@ -1759,28 +1806,6 @@ def update_dashboard(minutes, n_intervals):
     live_wind_data = [row for row in live_wind_data if row['date'] >= live_cutoff]
     if len(live_wind_data) > 2000:
         live_wind_data = live_wind_data[-2000:]
-
-    # Save to database periodically (every DATABASE_SAVE_INTERVAL_SECONDS).
-    # Skip writes on dropdown-only trigger to keep interaction lightweight.
-    save_interval = config.get('DATABASE_SAVE_INTERVAL_SECONDS', 600)
-    if (not is_time_range_change) and (
-        last_db_save is None or (now - last_db_save).total_seconds() >= save_interval
-    ):
-        try:
-            inserted_id = db.insert_reading(new_row)
-            if inserted_id is not None:
-                last_db_save = now
-                last_db_point_time = pd.to_datetime(new_row['date'])
-                # Keep in-memory cache aligned with persisted points only.
-                weather_data.append(new_row)
-                weather_data = [
-                    row for row in weather_data
-                    if row['date'] >= (now - datetime.timedelta(days=MEMORY_RETENTION_DAYS))
-                ]
-                if len(weather_data) > MEMORY_MAX_ROWS:
-                    weather_data = weather_data[-MEMORY_MAX_ROWS:]
-        except Exception as e:
-            print(f"Warning: Failed to save to database: {e}")
 
     # Keep callback responsive while preserving long selected windows.
     # For windows larger than in-memory retention, maintain a throttled DB cache.
@@ -3353,6 +3378,8 @@ def export_history_csv(n_clicks, start_date, end_date, end_enabled, selected_mon
 # ============================================================================
 # Application Entry Point
 # ============================================================================
+
+start_acquisition_thread()
 
 if __name__ == '__main__':
     # Application entry point when run directly
