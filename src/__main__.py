@@ -978,11 +978,15 @@ app.layout = html.Div(
                             ], className='history-calendar-legend-item'),
                             html.Span([
                                 html.Span('\uf73d', className='history-calendar-legend-icon history-calendar-legend-icon-rain'),
-                                ' Choveu'
+                                ' Chuva'
                             ], className='history-calendar-legend-item'),
                             html.Span([
                                 html.Span('\uf72e', className='history-calendar-legend-icon history-calendar-legend-icon-wind'),
-                                ' Velocidade do Vento'
+                                ' Vento Alto'
+                            ], className='history-calendar-legend-item'),
+                            html.Span([
+                                html.Span('\uf043', className='history-calendar-legend-icon history-calendar-legend-icon-dew'),
+                                ' Orvalho'
                             ], className='history-calendar-legend-item'),
                         ], className='history-calendar-legend-row')
                     ], className='history-card history-calendar-card'),
@@ -2818,7 +2822,7 @@ def update_history_page(start_date, end_date, end_enabled, selected_month, selec
         empty_temp = _empty_ts_figure('Temperatura (°C)', '°C')
         empty_pressure = _empty_ts_figure('Pressão Atmosférica (hPa)', 'hPa')
         empty_humidity = _empty_ts_figure('Umidade (%)', '%')
-        empty_dew = _empty_ts_figure('Ponto de Orvalho (°C)', '°C')
+        empty_dew = _empty_ts_figure('Chuva Diária Total (mm)', 'mm')
         empty_wind = _empty_ts_figure('Velocidade do Vento (m/s)', 'm/s')
         empty_dir = _empty_ts_figure('Direção do Vento (°)', 'Direção (°)')
         return (
@@ -2875,6 +2879,7 @@ def update_history_page(start_date, end_date, end_enabled, selected_month, selec
     month_day_counts = pd.Series(dtype=int)
     rainy_days_set = set()
     high_wind_days_set = set()
+    dew_ge_temp_days_set = set()
     if not month_df.empty:
         month_df = month_df.sort_values('date')
         month_day_counts = month_df.groupby(month_df['date'].dt.floor('D')).size()
@@ -2896,6 +2901,15 @@ def update_history_page(start_date, end_date, end_enabled, selected_month, selec
                 ts.date() for ts, value in day_max_wind.items()
                 if pd.notna(value) and float(value) > HISTORY_HIGH_WIND_LIMIT_MS
             }
+
+        if 'dew_point' in month_df.columns and 'temperature' in month_df.columns:
+            dew_values = pd.to_numeric(month_df['dew_point'], errors='coerce')
+            temp_values = pd.to_numeric(month_df['temperature'], errors='coerce')
+            dew_ge_temp_mask = dew_values.notna() & temp_values.notna() & (dew_values >= temp_values)
+            if dew_ge_temp_mask.any():
+                dew_ge_temp_days_set = {
+                    ts.date() for ts in month_df.loc[dew_ge_temp_mask, 'date'].dt.floor('D').unique()
+                }
 
     # Coverage ratio per day: actual records / expected records.
     # Expected is based on configured persistence cadence.
@@ -2969,6 +2983,8 @@ def update_history_page(start_date, end_date, end_enabled, selected_month, selec
                 day_icons.append(f"<span style='{icon_style_base}color:#39d3ff;'>\uf73d</span>")
             if day in high_wind_days_set:
                 day_icons.append(f"<span style='{icon_style_base}color:#ff5b74;'>\uf72e</span>")
+            if day in dew_ge_temp_days_set:
+                day_icons.append(f"<span style='{icon_style_base}color:#7bd7ff;'>\uf043</span>")
 
         day_text = str(day.day)
         if day_icons:
@@ -3089,7 +3105,7 @@ def update_history_page(start_date, end_date, end_enabled, selected_month, selec
         empty_temp = _empty_ts_figure('Temperatura (°C)', '°C')
         empty_pressure = _empty_ts_figure('Pressão Atmosférica (hPa)', 'hPa')
         empty_humidity = _empty_ts_figure('Umidade (%)', '%')
-        empty_dew = _empty_ts_figure('Ponto de Orvalho (°C)', '°C')
+        empty_dew = _empty_ts_figure('Chuva Diária Total (mm)', 'mm')
         empty_wind = _empty_ts_figure('Velocidade do Vento (m/s)', 'm/s')
         empty_dir = _empty_ts_figure('Direção do Vento (°)', 'Direção (°)')
         stats_content = html.Div('Nenhum dado encontrado para o período selecionado.', className='history-empty-text')
@@ -3113,7 +3129,7 @@ def update_history_page(start_date, end_date, end_enabled, selected_month, selec
         requested_points = PLOT_TARGET_POINTS
     requested_points = max(50, min(MAX_PLOT_POINTS, requested_points))
 
-    sample_columns = ['temperature', 'pressure', 'humidity', 'dew_point', 'wind_speed', 'wind_dir']
+    sample_columns = ['temperature', 'pressure', 'humidity', 'dew_point', 'wind_speed', 'wind_dir', 'rain_day']
     plot_df = _sample_history_dataframe(
         stats_df,
         requested_points,
@@ -3139,12 +3155,50 @@ def update_history_page(start_date, end_date, end_enabled, selected_month, selec
     pressure_series = pd.to_numeric(plot_df.get('pressure', pd.Series(dtype=float)), errors='coerce')
     humidity_series = pd.to_numeric(plot_df.get('humidity', pd.Series(dtype=float)), errors='coerce')
     dew_series = pd.to_numeric(plot_df.get('dew_point', pd.Series(dtype=float)), errors='coerce')
+    rain_day_series = pd.to_numeric(plot_df.get('rain_day', pd.Series(dtype=float)), errors='coerce')
     wind_series = pd.to_numeric(plot_df.get('wind_speed', pd.Series(dtype=float)), errors='coerce')
     dir_series = pd.to_numeric(plot_df.get('wind_dir', pd.Series(dtype=float)), errors='coerce')
 
+    dew_ge_temp_mask = temp_series.notna() & dew_series.notna() & (dew_series >= temp_series)
+    temp_highlight_x = plot_df.loc[dew_ge_temp_mask, 'date']
+    temp_highlight_y = temp_series[dew_ge_temp_mask]
+
     temp_fig = go.Figure(
-        data=[go.Scatter(x=plot_df['date'], y=temp_series, mode='lines', line={'color': '#ef5c42'}, name='Temperatura')],
-        layout={'template': 'plotly_dark', 'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf2c8</span>&nbsp;&nbsp;Temperatura (°C)", 'xaxis': {'title': 'Hora'}, 'yaxis': {'title': '°C'}}
+        data=[
+            go.Scatter(
+                x=plot_df['date'],
+                y=temp_series,
+                mode='lines',
+                line={'color': '#ef5c42'},
+                name='Temperatura'
+            ),
+            go.Scatter(
+                x=temp_highlight_x,
+                y=temp_highlight_y,
+                mode='markers',
+                marker={'color': '#b05cf6', 'size': 6},
+                name='Orvalho >= Temperatura'
+            ),
+        ],
+        layout={
+            'template': 'plotly_dark',
+            'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf2c8</span>&nbsp;&nbsp;Temperatura (°C)",
+            'xaxis': {'title': 'Hora'},
+            'yaxis': {'title': '°C'},
+            'showlegend': True,
+            'legend': {
+                'x': 0.5,
+                'y': 1.005,
+                'xanchor': 'center',
+                'yanchor': 'bottom',
+                'font': {'size': 13, 'color': '#d8e4f0'},
+                'bgcolor': 'rgba(0,0,0,0)',
+                'borderwidth': 0,
+                'orientation': 'h',
+                'itemsizing': 'constant',
+                'itemwidth': 30
+            },
+        }
     )
     pressure_fig = go.Figure(
         data=[go.Scatter(x=plot_df['date'], y=pressure_series, mode='lines', line={'color': '#7eb8ff'}, name='Pressão')],
@@ -3155,8 +3209,8 @@ def update_history_page(start_date, end_date, end_enabled, selected_month, selec
         layout={'template': 'plotly_dark', 'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf043</span>&nbsp;&nbsp;Umidade (%)", 'xaxis': {'title': 'Hora'}, 'yaxis': {'title': '%'}}
     )
     dew_fig = go.Figure(
-        data=[go.Scatter(x=plot_df['date'], y=dew_series, mode='lines', line={'color': '#aa96e3'}, name='Ponto de Orvalho')],
-        layout={'template': 'plotly_dark', 'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf76b</span>&nbsp;&nbsp;Ponto de Orvalho (°C)", 'xaxis': {'title': 'Hora'}, 'yaxis': {'title': '°C'}}
+        data=[go.Scatter(x=plot_df['date'], y=rain_day_series, mode='lines', line={'color': '#2ea8d5'}, name='Chuva Diária Total')],
+        layout={'template': 'plotly_dark', 'title': "<span style='font-family:\"Font Awesome 6 Free\";font-weight:900;'>\uf73d</span>&nbsp;&nbsp;Chuva Diária Total (mm)", 'xaxis': {'title': 'Hora'}, 'yaxis': {'title': 'mm'}}
     )
     wind_fig = go.Figure(
         data=[
@@ -3214,19 +3268,19 @@ def update_history_page(start_date, end_date, end_enabled, selected_month, selec
         figure.update_xaxes(showgrid=True, gridcolor='rgba(120, 146, 170, 0.2)', color='#c8d7e7')
         figure.update_yaxes(showgrid=True, gridcolor='rgba(120, 146, 170, 0.2)', color='#c8d7e7')
 
-    total_days_month = int(month_last.day)
-    rainy_days_month = 0
-    if not month_df.empty:
+    total_days_scope = max(1, (stats_scope_end.date() - stats_scope_start.date()).days + 1)
+    rainy_days_scope = 0
+    if not stats_df.empty:
         rain_masks = []
         for rain_col in ('rain_min', 'rain_hour', 'rain_day'):
-            if rain_col in month_df.columns:
-                rain_series = pd.to_numeric(month_df[rain_col], errors='coerce').fillna(0)
+            if rain_col in stats_df.columns:
+                rain_series = pd.to_numeric(stats_df[rain_col], errors='coerce').fillna(0)
                 rain_masks.append(rain_series > 0)
         if rain_masks:
             rain_any = rain_masks[0]
             for mask in rain_masks[1:]:
                 rain_any = rain_any | mask
-            rainy_days_month = int(month_df.loc[rain_any, 'date'].dt.floor('D').nunique())
+            rainy_days_scope = int(stats_df.loc[rain_any, 'date'].dt.floor('D').nunique())
 
     mode = stats_mode or 'minmax'
     stats_lines = []
@@ -3291,7 +3345,7 @@ def update_history_page(start_date, end_date, end_enabled, selected_month, selec
         html.P([
             html.I(className='fa-solid fa-cloud-rain info-icon'),
             'Dias com chuva no período: ',
-            html.Span(f'{rainy_days_month}/{total_days_month}', className='color-location')
+            html.Span(f'{rainy_days_scope}/{total_days_scope}', className='color-location')
         ])
     )
 
